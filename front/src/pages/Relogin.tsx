@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { CheckCircle2, History, Loader2, RefreshCcw, Search, XCircle } from "lucide-react";
+import { CheckCircle2, History, Loader2, RefreshCcw, Search, ShieldAlert, XCircle } from "lucide-react";
+import { AccountEmailLabel } from "@/components/AccountEmailIcon";
 import { Badge, Button, Card, EmptyState, Input, PageHeader, PaginationBar, Toast } from "@/components/ui";
 import { api, type AccountRecord, type ReloginStatus } from "@/lib/api";
 import { appendReloginHistory } from "@/lib/reloginHistory";
@@ -78,6 +79,13 @@ export function ReloginPage() {
   const eligibleCandidates = candidates.filter((item) => !!item.email && !!item.password);
   const selectedIds = Object.entries(selected).filter(([, value]) => value).map(([id]) => Number(id));
   const allSelected = eligibleCandidates.length > 0 && eligibleCandidates.every((item) => selected[item.id]);
+  const botRiskByAccountId = useMemo(() => {
+    const map = new Map<number, boolean>();
+    for (const item of accounts) {
+      map.set(item.id, !!item.bot_risk);
+    }
+    return map;
+  }, [accounts]);
 
   const start = async () => {
     if (!selectedIds.length || status?.running) return;
@@ -218,7 +226,21 @@ export function ReloginPage() {
                   {candidates.map((item) => (
                     <tr key={item.id} className="hover:bg-slate-50/70">
                       <td className="px-4 py-3"><input type="checkbox" disabled={!item.email || !item.password} checked={!!selected[item.id]} onChange={(event) => setSelected((old) => ({ ...old, [item.id]: event.target.checked }))} /></td>
-                      <td className="px-4 py-3 font-medium text-slate-900">{item.email}</td>
+                      <td className="px-4 py-3">
+                        <AccountEmailLabel
+                          email={item.email}
+                          botRisk={!!item.bot_risk}
+                          emailClassName="text-sm text-slate-900"
+                        />
+                        {item.bot_risk ? (
+                          <div className="mt-1">
+                            <Badge variant="warning">
+                              <ShieldAlert className="mr-1 h-3 w-3" aria-hidden="true" />
+                              风控标记
+                            </Badge>
+                          </div>
+                        ) : null}
+                      </td>
                       <td className="px-4 py-3 text-slate-500">{item.provider || "-"}</td>
                       <td className="px-4 py-3"><Badge variant={item.cpa_auth_available ? "success" : "secondary"}>{item.cpa_auth_available ? "已生成" : "无文件"}</Badge></td>
                       <td className="px-4 py-3"><Badge variant={item.grok2api_auth_available ? "success" : "secondary"}>{item.grok2api_auth_available ? "已生成" : "无文件"}</Badge></td>
@@ -233,10 +255,20 @@ export function ReloginPage() {
                 <label key={item.id} className={`flex items-start gap-3 p-4 ${!item.email || !item.password ? "opacity-60" : ""}`}>
                   <input type="checkbox" className="mt-1" disabled={!item.email || !item.password} checked={!!selected[item.id]} onChange={(event) => setSelected((old) => ({ ...old, [item.id]: event.target.checked }))} />
                   <div className="min-w-0 flex-1">
-                    <div className="break-all text-sm font-medium text-slate-900">{item.email}</div>
+                    <AccountEmailLabel
+                      email={item.email}
+                      botRisk={!!item.bot_risk}
+                      emailClassName="text-sm text-slate-900"
+                    />
                     <div className="mt-1 text-xs text-slate-500">{item.provider || "未知服务商"}</div>
-                    <div className="mt-2 flex gap-1.5">
+                    <div className="mt-2 flex flex-wrap gap-1.5">
                       {!item.email || !item.password ? <Badge variant="warning">缺少凭据</Badge> : null}
+                      {item.bot_risk ? (
+                        <Badge variant="warning">
+                          <ShieldAlert className="mr-1 h-3 w-3" aria-hidden="true" />
+                          风控标记
+                        </Badge>
+                      ) : null}
                       {item.cpa_auth_available ? <Badge variant="success">CPA</Badge> : null}
                       {item.grok2api_auth_available ? <Badge variant="success">Grok2API</Badge> : null}
                     </div>
@@ -272,7 +304,19 @@ export function ReloginPage() {
               <div key={item.account_id} className="flex items-start gap-3 px-4 py-3 sm:px-5">
                 {item.status === "success" ? <CheckCircle2 className="mt-0.5 h-4 w-4 text-emerald-600" /> : item.status === "failed" ? <XCircle className="mt-0.5 h-4 w-4 text-red-600" /> : <Loader2 className="mt-0.5 h-4 w-4 animate-spin text-slate-400" />}
                 <div className="min-w-0 flex-1">
-                  <div className="break-all text-sm font-medium text-slate-900">{item.email || `账号 #${item.account_id}`}</div>
+                  <AccountEmailLabel
+                    email={item.email || `账号 #${item.account_id}`}
+                    botRisk={!!botRiskByAccountId.get(item.account_id)}
+                    emailClassName="text-sm text-slate-900"
+                  />
+                  {botRiskByAccountId.get(item.account_id) ? (
+                    <div className="mt-1">
+                      <Badge variant="warning">
+                        <ShieldAlert className="mr-1 h-3 w-3" aria-hidden="true" />
+                        风控标记
+                      </Badge>
+                    </div>
+                  ) : null}
                   {item.error ? <div className="mt-1 break-all text-xs text-red-700">{item.error}</div> : null}
                   {item.status === "failed" && (item.stage || item.error_type || item.url) ? (
                     <div className="mt-2 space-y-1 rounded-lg bg-red-50 p-2 text-xs text-slate-600">

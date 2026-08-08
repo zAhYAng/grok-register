@@ -14,16 +14,17 @@ import {
   History,
   Loader2,
   LogIn,
-  Mail,
   UploadCloud,
   MoreHorizontal,
   Power,
   RefreshCw,
   Search,
+  ShieldAlert,
   Trash2,
   X,
 } from "lucide-react";
 import { AccountBatchActions } from "@/components/AccountBatchActions";
+import { AccountEmailIcon } from "@/components/AccountEmailIcon";
 import { api, type AccountRecord, type ReloginStatus } from "@/lib/api";
 import { appendReloginHistory } from "@/lib/reloginHistory";
 import { cn, copyText, formatDuration, maskSecret } from "@/lib/utils";
@@ -230,6 +231,7 @@ function AccountDetails({
     ["邮箱", detail.email],
     ["密码", showPassword ? detail.password : maskSecret(detail.password)],
     ["状态", detail.status],
+    ["风控标记", detail.bot_risk ? "是（该账号被打上机器人标记）" : "否"],
     ["CPA", detail.cpa_status],
     ["服务商", detail.provider],
     ["NSFW", detail.nsfw_status],
@@ -256,9 +258,18 @@ function AccountDetails({
   return (
     <div className="space-y-4 text-sm">
       <div className="rounded-xl border border-sky-100 bg-sky-50/70 p-3">
-        <div className="break-all font-medium text-foreground">{detail.email || "未记录邮箱"}</div>
+        <div className="flex items-start gap-2">
+          <AccountEmailIcon botRisk={!!detail.bot_risk} className="mt-0.5" />
+          <div className="break-all font-medium text-foreground">{detail.email || "未记录邮箱"}</div>
+        </div>
         <div className="mt-2 flex flex-wrap gap-2">
           <Badge variant={statusVariant(detail.status)}>{detail.status || "unknown"}</Badge>
+          {detail.bot_risk ? (
+            <Badge variant="warning">
+              <ShieldAlert className="mr-1 h-3 w-3" aria-hidden="true" />
+              风控标记
+            </Badge>
+          ) : null}
           <Badge variant={cpaVariant(detail.cpa_status)}>CPA {detail.cpa_status || "-"}</Badge>
           <Badge variant={cpaVariant(detail.cpa_remote_status)}>
             CPA {remoteImportLabel(detail.cpa_remote_status)}
@@ -448,9 +459,11 @@ export function AccountsPage() {
   const initialStatus = searchParams.get("status") || "";
   const initialKeyword = searchParams.get("q") || "";
   const initialBatchId = searchParams.get("batch_id") || "";
+  const initialBotRisk = searchParams.get("bot_risk") || "";
   const [items, setItems] = useState<AccountRecord[]>([]);
   const [status, setStatus] = useState(initialStatus);
   const [emailDisableStatus, setEmailDisableStatus] = useState("");
+  const [botRiskFilter, setBotRiskFilter] = useState(initialBotRisk);
   const [keyword, setKeyword] = useState(initialKeyword);
   const [batchIdFilter] = useState(initialBatchId);
   const [selected, setSelected] = useState<Record<number, boolean>>({});
@@ -508,6 +521,7 @@ export function AccountsPage() {
         emailDisableStatus,
         q: keyword,
         batchId: batchIdFilter || undefined,
+        botRisk: botRiskFilter || undefined,
         limit: targetPageSize,
         offset: (targetPage - 1) * targetPageSize,
       });
@@ -999,7 +1013,7 @@ export function AccountsPage() {
         </div>
       ) : null}
       <Card>
-        <CardContent className="grid gap-3 p-4 sm:grid-cols-2 lg:grid-cols-[160px_190px_minmax(0,1fr)_auto]">
+        <CardContent className="grid gap-3 p-4 sm:grid-cols-2 lg:grid-cols-[140px_170px_150px_minmax(0,1fr)_auto]">
           <Select
             value={status}
             onChange={(e) => {
@@ -1030,6 +1044,18 @@ export function AccountsPage() {
             <option value="unsupported_source">非 accounts</option>
             <option value="not_attempted">未执行</option>
             <option value="not_applicable">不适用</option>
+          </Select>
+          <Select
+            value={botRiskFilter}
+            onChange={(e) => {
+              setBotRiskFilter(e.target.value);
+              setSelected({});
+            }}
+            aria-label="按风控标记筛选"
+          >
+            <option value="">不限</option>
+            <option value="1">风控标记</option>
+            <option value="0">正常账号</option>
           </Select>
           <div className="relative min-w-0 sm:col-span-2 lg:col-span-1">
             <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
@@ -1106,7 +1132,7 @@ export function AccountsPage() {
                         </label>
                         <div className="min-w-0 flex-1">
                           <div className="flex items-start gap-2">
-                            <Mail className="mt-1 h-4 w-4 shrink-0 text-primary" aria-hidden="true" />
+                            <AccountEmailIcon botRisk={!!item.bot_risk} className="mt-1" />
                             <div className="break-all font-medium leading-6 text-foreground">{item.email || "-"}</div>
                           </div>
                           <div className="mt-2 space-y-2">
@@ -1188,8 +1214,18 @@ export function AccountsPage() {
                           </td>
                           <td className={`max-w-[270px] border-b border-slate-100 px-3 py-3 transition-colors ${detail?.id === item.id ? "bg-sky-50" : "bg-white group-hover:bg-slate-50"}`}>
                             <div className="flex min-w-0 items-center gap-2.5">
-                              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-sky-50 text-sky-600 ring-1 ring-sky-100">
-                                <Mail className="h-4 w-4" aria-hidden="true" />
+                              <span
+                                className={cn(
+                                  "flex h-8 w-8 shrink-0 items-center justify-center rounded-lg ring-1",
+                                  item.bot_risk
+                                    ? "bg-amber-50 text-amber-600 ring-amber-100"
+                                    : "bg-sky-50 text-sky-600 ring-sky-100",
+                                )}
+                              >
+                                <AccountEmailIcon
+                                  botRisk={!!item.bot_risk}
+                                  className={item.bot_risk ? "text-amber-600" : "text-sky-600"}
+                                />
                               </span>
                               <div className="min-w-0">
                                 <div className="truncate font-medium text-foreground" title={item.email}>{item.email || "-"}</div>

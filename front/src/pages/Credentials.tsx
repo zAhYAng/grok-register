@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { Archive, Copy, Download, Loader2, Search, UploadCloud } from "lucide-react";
+import { Archive, Copy, Download, Loader2, Search, ShieldAlert, UploadCloud } from "lucide-react";
+import { AccountEmailLabel } from "@/components/AccountEmailIcon";
 import { Badge, Button, Card, EmptyState, Input, PageHeader, PaginationBar, Toast } from "@/components/ui";
 import { api, type AccountRecord, type AuthKind } from "@/lib/api";
 import { copyText } from "@/lib/utils";
@@ -176,10 +177,20 @@ export function CredentialsPage() {
                   <div className="flex min-w-0 flex-1 items-start gap-3">
                     <input type="checkbox" className="mt-1" disabled={!available} checked={!!selected[item.id]} onChange={(event) => setSelected((old) => ({ ...old, [item.id]: event.target.checked }))} />
                     <div className="min-w-0">
-                      <div className="break-all text-sm font-medium text-slate-950">{item.email}</div>
+                      <AccountEmailLabel
+                        email={item.email}
+                        botRisk={!!item.bot_risk}
+                        emailClassName="text-sm text-slate-950"
+                      />
                       <div className="mt-1 truncate text-xs text-slate-500" title={path}>{path || (tab === "sso" ? "未找到 data/accounts 账号文件" : "未生成本地文件")}</div>
                       <div className="mt-2 flex flex-wrap gap-1.5">
                         <Badge variant={available ? "success" : "secondary"}>{available ? "文件可用" : "无文件"}</Badge>
+                        {item.bot_risk ? (
+                          <Badge variant="warning">
+                            <ShieldAlert className="mr-1 h-3 w-3" aria-hidden="true" />
+                            风控标记
+                          </Badge>
+                        ) : null}
                         {remoteStatus && remoteStatus !== "not_configured" ? <Badge variant={remoteStatus === "success" ? "success" : remoteStatus === "failed" ? "destructive" : "warning"}>远程 {remoteStatus}</Badge> : null}
                       </div>
                     </div>

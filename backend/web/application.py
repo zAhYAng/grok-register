@@ -382,6 +382,11 @@ def _serialize_record(record: Dict[str, Any]) -> Dict[str, Any]:
     item["success"] = bool(item.get("success"))
     item["cpa_enabled"] = bool(item.get("cpa_enabled"))
     item["sso_saved"] = bool(item.get("sso_saved"))
+    item["bot_risk"] = bool(item.get("bot_risk"))
+    if item.get("bfs") is None:
+        item["bfs"] = ""
+    else:
+        item["bfs"] = str(item.get("bfs"))
     raw_config = _gr().config
     from backend.integrations.grok2api_client import Grok2APIClient
 
@@ -679,6 +684,7 @@ def create_app() -> FastAPI:
         gr._wire_runtime_modules()
         try:
             gr.get_registration_repository()
+            gr.backfill_access_token_bot_risk()
         except Exception as exc:
             print(f"[web] 初始化 SQLite 失败: {exc}", flush=True)
 
@@ -789,6 +795,7 @@ def create_app() -> FastAPI:
         q: str = Query(""),
         keyword: str = Query(""),
         batch_id: str = Query(""),
+        bot_risk: str = Query(""),
         limit: int = Query(20, ge=1, le=10000),
         offset: int = Query(0, ge=0),
     ) -> Dict[str, Any]:
@@ -797,11 +804,13 @@ def create_app() -> FastAPI:
         status_norm = str(status or "").strip().lower()
         keyword_norm = str(q or keyword or "").strip()
         batch_norm = str(batch_id or "").strip()
+        bot_risk_norm = str(bot_risk or "").strip().lower()
         rows = store.list_results(
             status=status_norm,
             email_disable_status=str(email_disable_status or "").strip().lower(),
             keyword=keyword_norm,
             batch_id=batch_norm,
+            bot_risk=bot_risk_norm,
             limit=limit,
             offset=offset,
         )
@@ -810,6 +819,7 @@ def create_app() -> FastAPI:
             email_disable_status=str(email_disable_status or "").strip().lower(),
             keyword=keyword_norm,
             batch_id=batch_norm,
+            bot_risk=bot_risk_norm,
         )
         return {
             "ok": True,

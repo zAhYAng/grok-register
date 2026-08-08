@@ -60,6 +60,8 @@ export type AccountRecord = {
   source: string;
   worker_id: number;
   sso_saved: boolean;
+  bot_risk?: boolean;
+  bfs?: string | number | null;
   extra?: Record<string, unknown>;
 };
 
@@ -231,6 +233,7 @@ export const api = {
       emailDisableStatus?: string;
       q?: string;
       batchId?: string;
+      botRisk?: string;
       limit?: number;
       offset?: number;
     } = {}
@@ -240,6 +243,7 @@ export const api = {
     if (params.emailDisableStatus) sp.set("email_disable_status", params.emailDisableStatus);
     if (params.q) sp.set("q", params.q);
     if (params.batchId) sp.set("batch_id", params.batchId);
+    if (params.botRisk) sp.set("bot_risk", params.botRisk);
     if (params.limit) sp.set("limit", String(params.limit));
     if (params.offset) sp.set("offset", String(params.offset));
     const qs = sp.toString();

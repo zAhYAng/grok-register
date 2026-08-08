@@ -50,6 +50,8 @@ RESULT_COLUMNS = (
     "account_file",
     "sso_saved",
     "nsfw_status",
+    "bot_risk",
+    "bfs",
     "extra_json",
 )
 
@@ -122,6 +124,8 @@ class RegistrationRepository:
                     account_file TEXT NOT NULL DEFAULT '',
                     sso_saved INTEGER NOT NULL DEFAULT 0,
                     nsfw_status TEXT NOT NULL DEFAULT '',
+                    bot_risk INTEGER NOT NULL DEFAULT 0,
+                    bfs TEXT NOT NULL DEFAULT '',
                     extra_json TEXT NOT NULL DEFAULT '{}'
                 );
 
@@ -153,6 +157,8 @@ class RegistrationRepository:
                 "grok2api_remote_status": "TEXT NOT NULL DEFAULT 'not_configured'",
                 "grok2api_remote_imported_at": "TEXT NOT NULL DEFAULT ''",
                 "grok2api_remote_error": "TEXT NOT NULL DEFAULT ''",
+                "bot_risk": "INTEGER NOT NULL DEFAULT 0",
+                "bfs": "TEXT NOT NULL DEFAULT ''",
             }
             for column, definition in migrations.items():
                 if column not in existing_columns:
@@ -212,7 +218,7 @@ class RegistrationRepository:
                 """,
                 (self.now_text(),),
             )
-            conn.execute("PRAGMA user_version = 5")
+            conn.execute("PRAGMA user_version = 6")
 
     def add_result(self, record: Dict[str, Any]) -> int:
         now = self.now_text()
@@ -265,6 +271,8 @@ class RegistrationRepository:
             "account_file": str(record.get("account_file") or ""),
             "sso_saved": 1 if bool(record.get("sso_saved")) else 0,
             "nsfw_status": str(record.get("nsfw_status") or ""),
+            "bot_risk": 1 if bool(record.get("bot_risk")) else 0,
+            "bfs": "" if record.get("bfs") is None else str(record.get("bfs")),
             "extra_json": extra_json,
         }
         columns = ", ".join(RESULT_COLUMNS)
@@ -292,6 +300,29 @@ class RegistrationRepository:
             ).fetchone()
         return row is not None
 
+    def has_registered_or_consumed(self, email: str) -> bool:
+        """成功、已保存 SSO，或已判定账号已注册的邮箱，都应避免再次取用。"""
+        normalized = str(email or "").strip()
+        if not normalized:
+            return False
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT 1
+                FROM registration_results
+                WHERE email = ? COLLATE NOCASE
+                  AND (
+                    success = 1
+                    OR sso_saved = 1
+                    OR lower(coalesce(failure_type, '')) = 'already_registered'
+                    OR lower(coalesce(email_disable_status, '')) IN ('success', 'failed')
+                  )
+                LIMIT 1
+                """,
+                (normalized,),
+            ).fetchone()
+        return row is not None
+
     @staticmethod
     def _result_filters(
         *,
@@ -299,6 +330,7 @@ class RegistrationRepository:
         email_disable_status: str = "",
         keyword: str = "",
         batch_id: str = "",
+        bot_risk: str = "",
     ) -> Tuple[str, List[Any]]:
         clauses = []
         params: List[Any] = []
@@ -314,6 +346,11 @@ class RegistrationRepository:
         if normalized_batch_id:
             clauses.append("batch_id = ?")
             params.append(normalized_batch_id)
+        normalized_bot_risk = str(bot_risk or "").strip().lower()
+        if normalized_bot_risk in {"1", "true", "yes", "risk", "bot", "bot_risk"}:
+            clauses.append("bot_risk = 1")
+        elif normalized_bot_risk in {"0", "false", "no", "normal", "safe"}:
+            clauses.append("COALESCE(bot_risk, 0) = 0")
         normalized_keyword = str(keyword or "").strip()
         if normalized_keyword:
             like = f"%{normalized_keyword}%"
@@ -332,6 +369,7 @@ class RegistrationRepository:
         email_disable_status: str = "",
         keyword: str = "",
         batch_id: str = "",
+        bot_risk: str = "",
         limit: int = 2000,
         offset: int = 0,
     ) -> List[Dict[str, Any]]:
@@ -340,6 +378,7 @@ class RegistrationRepository:
             email_disable_status=email_disable_status,
             keyword=keyword,
             batch_id=batch_id,
+            bot_risk=bot_risk,
         )
         safe_limit = max(1, min(int(limit or 2000), 10000))
         safe_offset = max(0, int(offset or 0))
@@ -364,6 +403,7 @@ class RegistrationRepository:
         email_disable_status: str = "",
         keyword: str = "",
         batch_id: str = "",
+        bot_risk: str = "",
     ) -> int:
         """返回与账号列表相同筛选条件下的记录总数。"""
         where, params = self._result_filters(
@@ -371,6 +411,7 @@ class RegistrationRepository:
             email_disable_status=email_disable_status,
             keyword=keyword,
             batch_id=batch_id,
+            bot_risk=bot_risk,
         )
         with self._connect() as conn:
             row = conn.execute(
@@ -490,6 +531,12 @@ class RegistrationRepository:
                         "grok2api_remote_error": str(
                             detail.get("grok2api_remote_error") or ""
                         ),
+                        "bot_risk": 1 if bool(detail.get("bot_risk")) else 0,
+                        "bfs": (
+                            ""
+                            if detail.get("bfs") is None
+                            else str(detail.get("bfs"))
+                        ),
                     }
                 )
                 assignments.extend(
@@ -508,6 +555,8 @@ class RegistrationRepository:
                         "grok2api_remote_status = :grok2api_remote_status",
                         "grok2api_remote_imported_at = :grok2api_remote_imported_at",
                         "grok2api_remote_error = :grok2api_remote_error",
+                        "bot_risk = :bot_risk",
+                        "bfs = :bfs",
                     ]
                 )
                 if relogin_status == "success" and not screenshot_path:
@@ -517,6 +566,29 @@ class RegistrationRepository:
                 values,
             )
             return bool(cursor.rowcount)
+
+    def update_bot_risk_by_email(
+        self,
+        email: str,
+        *,
+        bot_risk: bool,
+        bfs: Any = None,
+    ) -> int:
+        """按邮箱回填 access_token 上的 bfs / bot_risk 标记。"""
+        normalized = str(email or "").strip()
+        if not normalized:
+            return 0
+        bfs_text = "" if bfs is None else str(bfs)
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE registration_results
+                SET bot_risk = ?, bfs = ?
+                WHERE email = ? COLLATE NOCASE
+                """,
+                (1 if bot_risk else 0, bfs_text, normalized),
+            )
+            return int(cursor.rowcount or 0)
 
     def update_remote_import_status(
         self,

@@ -171,6 +171,20 @@ def decode_jwt_payload(token: str) -> dict:
         return {}
 
 
+def access_token_bfs(token: str):
+    """读取 OAuth access_token 上的 bfs 声明；缺失时返回 None。"""
+    payload = decode_jwt_payload(token)
+    if not isinstance(payload, dict) or "bfs" not in payload:
+        return None
+    return payload.get("bfs")
+
+
+def access_token_bot_risk(token: str) -> bool:
+    """access_token 的 bfs=1 表示风控标记。"""
+    bfs = access_token_bfs(token)
+    return bfs == 1 or bfs == "1"
+
+
 def rfc3339_ns(ts: float | None = None) -> str:
     """2026-07-10T01:00:00.000000000Z"""
     if ts is None:

@@ -144,13 +144,94 @@ def get_registration_repository():
     return _repository
 
 
+def backfill_access_token_bot_risk(log_callback=None) -> int:
+    """从已有 CPA / Grok2API 授权文件回填 access_token 的 bfs 风控标记。"""
+    try:
+        repo = get_registration_repository()
+    except Exception as exc:
+        if log_callback:
+            log_callback(f"[!] bot_risk 回填初始化失败: {exc}")
+        return 0
+
+    auth_dirs = []
+    for key in ("cpa_auth_dir", "grok2api_auth_dir"):
+        raw = str(config.get(key, "") or "").strip()
+        if not raw:
+            continue
+        path = raw if os.path.isabs(raw) else os.path.join(APP_DIR, raw)
+        if os.path.isdir(path):
+            auth_dirs.append(path)
+    if not auth_dirs:
+        return 0
+
+    updated = 0
+    seen_emails = set()
+    for auth_dir in auth_dirs:
+        try:
+            names = os.listdir(auth_dir)
+        except OSError:
+            continue
+        for name in names:
+            if not name.endswith(".json"):
+                continue
+            file_path = os.path.join(auth_dir, name)
+            try:
+                with open(file_path, "r", encoding="utf-8") as handle:
+                    payload = json.load(handle)
+            except Exception:
+                continue
+            candidates = []
+            if isinstance(payload, dict):
+                if payload.get("access_token"):
+                    candidates.append(payload)
+                accounts = payload.get("accounts")
+                if isinstance(accounts, list):
+                    candidates.extend(item for item in accounts if isinstance(item, dict))
+            for item in candidates:
+                token = str(item.get("access_token") or "").strip()
+                if not token:
+                    continue
+                email = str(item.get("email") or "").strip().lower()
+                if not email:
+                    email = str(
+                        _s2cpa.decode_jwt_payload(token).get("email")
+                        or _s2cpa.decode_jwt_payload(token).get("sub")
+                        or ""
+                    ).strip().lower()
+                if not email or "@" not in email or email in seen_emails:
+                    continue
+                seen_emails.add(email)
+                bfs = _s2cpa.access_token_bfs(token)
+                bot_risk = _s2cpa.access_token_bot_risk(token)
+                if not bot_risk and bfs is None:
+                    continue
+                try:
+                    count = repo.update_bot_risk_by_email(
+                        email, bot_risk=bot_risk, bfs=bfs if bfs is not None else ""
+                    )
+                except Exception:
+                    continue
+                if count:
+                    updated += count
+    if updated and log_callback:
+        log_callback(f"[*] 已从授权文件回填 bot_risk 标记 {updated} 条")
+    return updated
+
+
 def email_registered_successfully(email):
-    """数据库或旧账号文件中已有成功记录时返回 True。"""
+    """数据库或旧账号文件中已有成功/已消耗记录时返回 True。
+
+    除正式 success 外，已保存 SSO、已判定 already_registered、或已尝试停用
+    的 Outlook 邮箱也应跳过，避免邮箱池重复取用造成死循环。
+    """
     normalized = str(email or "").strip()
     if not normalized:
         return False
     try:
-        if get_registration_repository().has_success(normalized):
+        repo = get_registration_repository()
+        if repo.has_success(normalized):
+            return True
+        if hasattr(repo, "has_registered_or_consumed") and repo.has_registered_or_consumed(normalized):
             return True
     except Exception:
         pass
@@ -170,7 +251,7 @@ DEFAULT_CONFIG = {
     "cloudflare_auth_mode": "none",
     "cloudflare_custom_auth": "",
     "cloudflare_path_domains": "/api/domains",
-    "cloudflare_path_accounts": "/api/new_address",
+    "cloudflare_path_accounts": "/admin/new_address",
     "cloudflare_path_token": "/api/token",
     "cloudflare_path_messages": "/api/mails",
     "outlookemail_api_base": "",
@@ -514,6 +595,8 @@ def persist_registration_result(
                 "account_file": account_file,
                 "sso_saved": sso_saved,
                 "nsfw_status": nsfw_status,
+                "bot_risk": bool(detail.get("bot_risk")),
+                "bfs": "" if detail.get("bfs") is None else detail.get("bfs"),
                 "extra": extra_data,
             }
         )
@@ -684,7 +767,7 @@ def cloudflare_create_temp_address(api_base):
     return cloudflare_provider.create_temp_address(
         http_post,
         api_base,
-        accounts_path=get_cloudflare_path("cloudflare_path_accounts", "/api/new_address"),
+        accounts_path=get_cloudflare_path("cloudflare_path_accounts", "/admin/new_address"),
         domain=cloudflare_next_default_domain(),
         api_key=get_cloudflare_api_key(),
         auth_mode=get_cloudflare_auth_mode(),
@@ -797,6 +880,109 @@ def disable_outlookemail_after_cpa_success(email, cpa_detail=None, log_callback=
         detail.update(status="failed", error=str(exc))
         if log_callback:
             log_callback(f"[!] OutlookEmail 邮箱停用失败，CPA 成功记录保留: {exc}")
+    return detail
+
+
+def disable_outlookemail_consumed(
+    email,
+    *,
+    reason: str = "",
+    log_callback=None,
+) -> dict:
+    """在账号已存在 / 已拿 SSO 等场景下停用 Outlook 邮箱，避免重复取用。
+
+    与 CPA 成功后停用共用同一开关 outlookemail_disable_after_cpa_success：
+    仅在开关开启且来源为 accounts 时才会远程停用。
+    """
+    if not is_outlookemail_registration():
+        return default_email_disable_detail("", None)
+    if get_outlookemail_source() != "accounts":
+        return {
+            "status": "unsupported_source",
+            "account_id": "",
+            "disabled_at": "",
+            "error": "",
+        }
+    if not bool(config.get("outlookemail_disable_after_cpa_success", False)):
+        if log_callback:
+            log_callback("[*] OutlookEmail 自动停用功能未开启，跳过停用")
+        return {
+            "status": "feature_disabled",
+            "account_id": "",
+            "disabled_at": "",
+            "error": "",
+        }
+
+    normalized_email = str(email or "").strip()
+    detail = {
+        "status": "not_attempted",
+        "account_id": "",
+        "disabled_at": "",
+        "error": "",
+    }
+    if not normalized_email:
+        detail.update(status="failed", error="缺少邮箱地址")
+        return detail
+    try:
+        account = outlookemail_provider.account_for_email(
+            http_get,
+            get_outlookemail_api_base(),
+            get_outlookemail_api_key(),
+            normalized_email,
+            group_id=str(config.get("outlookemail_group_id", "") or "").strip(),
+        )
+        detail["account_id"] = str(account.get("id") or "")
+        reason_text = str(reason or "").strip()
+        if log_callback:
+            already = ("已注册" in reason_text) or ("already" in reason_text.lower()) or (
+                "existing account" in reason_text.lower()
+            )
+            if already:
+                log_callback(
+                    f"[OutlookEmail] 账号已注册，正在停用 Outlook 邮箱: {normalized_email}"
+                    f" (ID={detail['account_id'] or '-'})"
+                )
+                if reason_text:
+                    log_callback(f"[OutlookEmail] 已注册详情: {reason_text}")
+            else:
+                suffix = f"（原因: {reason_text}）" if reason_text else ""
+                log_callback(
+                    f"[OutlookEmail] 正在停用已消耗邮箱 ID={detail['account_id'] or '-'}{suffix}"
+                )
+        result = outlookemail_provider.disable_account(
+            http_get,
+            direct_http_session,
+            get_outlookemail_api_base(),
+            normalized_email,
+            api_key=get_outlookemail_api_key(),
+            group_id=str(config.get("outlookemail_group_id", "") or "").strip(),
+            web_password=str(config.get("outlookemail_web_password", "") or ""),
+            session_cookie=str(config.get("outlookemail_session_cookie", "") or "").strip(),
+            proxies={},
+        )
+        detail.update(
+            status="success",
+            account_id=str(result.get("account_id") or detail.get("account_id") or ""),
+            disabled_at=RegistrationRepository.now_text(),
+            error="",
+        )
+        if log_callback:
+            extra = "（原本已停用）" if result.get("already_inactive") else ""
+            already = ("已注册" in reason_text) or ("already" in reason_text.lower()) or (
+                "existing account" in reason_text.lower()
+            )
+            if already:
+                log_callback(
+                    f"[+] 账号已注册场景：Outlook 邮箱已停用{extra}: {normalized_email}"
+                )
+            else:
+                log_callback(f"[+] OutlookEmail 邮箱已停用{extra}: {normalized_email}")
+    except Exception as exc:
+        detail.update(status="failed", error=str(exc))
+        if log_callback:
+            already = ("已注册" in str(reason or "")) or ("already" in str(reason or "").lower())
+            prefix = "账号已注册场景：" if already else ""
+            log_callback(f"[!] {prefix}OutlookEmail 邮箱停用失败: {exc}")
     return detail
 
 
@@ -990,6 +1176,8 @@ def add_sso_to_cpa(raw_token, email="", log_callback=None, result_out=None) -> b
         grok2api_remote_status="not_configured",
         grok2api_remote_imported_at="",
         grok2api_remote_error="",
+        bot_risk=False,
+        bfs="",
         error="",
     )
     if not cpa_enabled:
@@ -1091,10 +1279,18 @@ def add_sso_to_cpa(raw_token, email="", log_callback=None, result_out=None) -> b
             _append_sso_pending(email, sso, log_callback=log_callback)
             return False
         record = _s2cpa.token_to_cpa_record(token, email=email, sso=sso)
-        ap = _s2cpa.decode_jwt_payload(record.get("access_token", ""))
+        access_token = str(record.get("access_token") or "")
+        ap = _s2cpa.decode_jwt_payload(access_token)
         ref = ap.get("referrer")
         if ref:
             _cpa_log(f"access_token referrer={ref!r}")
+        bfs = _s2cpa.access_token_bfs(access_token)
+        bot_risk = _s2cpa.access_token_bot_risk(access_token)
+        _set_result(bfs=bfs if bfs is not None else "", bot_risk=bot_risk)
+        if bot_risk:
+            _cpa_log(f"access_token 风控标记 bfs={bfs!r}")
+        elif bfs is not None:
+            _cpa_log(f"access_token bfs={bfs!r}")
         wrote_ok = False
         auth_entries = []
         auth_errors = list(preflight_errors)
@@ -1585,6 +1781,7 @@ def get_email_and_token(api_key=None):
             # cloudflare_temp_email 专用模式
             return cloudflare_create_temp_address(api_base)
         except Exception as primary_exc:
+            create_path = get_cloudflare_path("cloudflare_path_accounts", "/admin/new_address")
             try:
                 return cloudflare_provider.create_mailbox_fallback(
                     http_get,
@@ -1597,8 +1794,14 @@ def get_email_and_token(api_key=None):
                     auth_mode=get_cloudflare_auth_mode(),
                     custom_auth=get_cloudflare_custom_auth(),
                 )
-            except Exception:
-                raise Exception(f"Cloudflare 创建邮箱失败: {primary_exc}")
+            except Exception as fallback_exc:
+                raise Exception(
+                    "Cloudflare 创建邮箱失败；"
+                    f"主接口 {create_path}: "
+                    f"{primary_exc.__class__.__name__}: {primary_exc}；"
+                    f"兼容回退: "
+                    f"{fallback_exc.__class__.__name__}: {fallback_exc}"
+                ) from fallback_exc
     if provider == "mailnest":
         return mailnest_buy_email(), "_"
     return duckmail_provider.create_mailbox(
@@ -2419,6 +2622,16 @@ def run_registration(count):
                             local_fail += 1
                             i += 1
                             retry = 0
+                            # xAI 侧账号通常已创建，按自动停用开关尝试停用 Outlook 邮箱，避免下次再取到同一邮箱。
+                            email_disable_detail = (
+                                disable_outlookemail_consumed(
+                                    email,
+                                    reason=f"CPA失败但已保存SSO: {reason}",
+                                    log_callback=lambda m: registration_log(f"[W{wid+1}] {m}")
+                                )
+                                if is_outlookemail_registration()
+                                else default_email_disable_detail("", cpa_detail)
+                            )
                             _persist_result(
                                 started_at=attempt_started_at,
                                 worker_id=wid,
@@ -2426,7 +2639,7 @@ def run_registration(count):
                                 password=current_attempt_password(profile),
                                 status="failure",
                                 cpa_detail=cpa_detail,
-                                email_disable_detail=default_email_disable_detail("", cpa_detail),
+                                email_disable_detail=email_disable_detail,
                                 failure_type=FAIL_CPA,
                                 failure_reason=reason,
                                 account_file=email_file,
@@ -2533,13 +2746,39 @@ def run_registration(count):
                         retry = 0
                         if kind == FAIL_RISK:
                             cpa_detail.update(status="rejected", error=str(exc))
+                        fail_email = current_attempt_email(email, exc)
+                        email_disable_detail = None
+                        if kind == FAIL_ALREADY_REGISTERED and is_outlookemail_registration() and fail_email:
+                            registration_log(
+                                f"[W{wid+1}] [*] 账号已注册，按自动停用开关处理 Outlook 邮箱: {fail_email}"
+                            )
+                            email_disable_detail = disable_outlookemail_consumed(
+                                fail_email,
+                                reason=f"账号已注册: {exc}",
+                                log_callback=lambda m: registration_log(f"[W{wid+1}] {m}")
+                            )
+                            status = str((email_disable_detail or {}).get("status") or "")
+                            if status == "success":
+                                registration_log(
+                                    f"[W{wid+1}] [+] 账号已注册：Outlook 邮箱停用完成: {fail_email}"
+                                )
+                            elif status == "feature_disabled":
+                                registration_log(
+                                    f"[W{wid+1}] [*] 账号已注册：自动停用开关未开启，跳过停用 Outlook: {fail_email}"
+                                )
+                            elif status == "failed":
+                                registration_log(
+                                    f"[W{wid+1}] [!] 账号已注册：Outlook 邮箱停用失败: {fail_email}"
+                                    f" — {(email_disable_detail or {}).get('error') or ''}"
+                                )
                         _persist_result(
                             started_at=attempt_started_at,
                             worker_id=wid,
-                            email=current_attempt_email(email, exc),
+                            email=fail_email,
                             password=current_attempt_password(profile),
                             status="failure",
                             cpa_detail=cpa_detail,
+                            email_disable_detail=email_disable_detail,
                             failure_type=kind,
                             failure_reason=str(exc),
                             account_file=email_file,
@@ -2724,13 +2963,22 @@ def run_registration(count):
                     _record_failure(RuntimeError(f"[CPA] {reason}"))
                     retry_count_for_slot = 0
                     i += 1
+                    email_disable_detail = (
+                        disable_outlookemail_consumed(
+                            email,
+                            reason=f"CPA失败但已保存SSO: {reason}",
+                            log_callback=registration_log
+                        )
+                        if is_outlookemail_registration()
+                        else default_email_disable_detail("", cpa_detail)
+                    )
                     _persist_result(
                         started_at=attempt_started_at,
                         email=email,
                         password=current_attempt_password(profile),
                         status="failure",
                         cpa_detail=cpa_detail,
-                        email_disable_detail=default_email_disable_detail("", cpa_detail),
+                        email_disable_detail=email_disable_detail,
                         failure_type=FAIL_CPA,
                         failure_reason=reason,
                         account_file=email_file,
@@ -2841,12 +3089,38 @@ def run_registration(count):
                 i += 1
                 if kind == FAIL_RISK:
                     cpa_detail.update(status="rejected", error=str(exc))
+                fail_email = current_attempt_email(email, exc)
+                email_disable_detail = None
+                if kind == FAIL_ALREADY_REGISTERED and is_outlookemail_registration() and fail_email:
+                    registration_log(
+                        f"[*] 账号已注册，按自动停用开关处理 Outlook 邮箱: {fail_email}"
+                    )
+                    email_disable_detail = disable_outlookemail_consumed(
+                        fail_email,
+                        reason=f"账号已注册: {exc}",
+                        log_callback=registration_log
+                    )
+                    status = str((email_disable_detail or {}).get("status") or "")
+                    if status == "success":
+                        registration_log(
+                            f"[+] 账号已注册：Outlook 邮箱停用完成: {fail_email}"
+                        )
+                    elif status == "feature_disabled":
+                        registration_log(
+                            f"[*] 账号已注册：自动停用开关未开启，跳过停用 Outlook: {fail_email}"
+                        )
+                    elif status == "failed":
+                        registration_log(
+                            f"[!] 账号已注册：Outlook 邮箱停用失败: {fail_email}"
+                            f" — {(email_disable_detail or {}).get('error') or ''}"
+                        )
                 _persist_result(
                     started_at=attempt_started_at,
-                    email=current_attempt_email(email, exc),
+                    email=fail_email,
                     password=current_attempt_password(profile),
                     status="failure",
                     cpa_detail=cpa_detail,
+                    email_disable_detail=email_disable_detail,
                     failure_type=kind,
                     failure_reason=str(exc),
                     account_file=email_file,
