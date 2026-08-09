@@ -218,6 +218,29 @@ def backfill_access_token_bot_risk(log_callback=None) -> int:
     return updated
 
 
+def backfill_registration_risk_bot_risk(log_callback=None) -> int:
+    """回填历史注册风控拒绝记录的 bot_risk 标记。
+
+    这类账号没有 access_token（OAuth 被跳过），回填不到 bfs，只能按
+    failure_type + failure_reason 认定。
+    """
+    try:
+        repo = get_registration_repository()
+    except Exception as exc:
+        if log_callback:
+            log_callback(f"[!] 注册风控 bot_risk 回填初始化失败: {exc}")
+        return 0
+    try:
+        updated = repo.backfill_registration_risk_bot_risk()
+    except Exception as exc:
+        if log_callback:
+            log_callback(f"[!] 注册风控 bot_risk 回填失败: {exc}")
+        return 0
+    if updated and log_callback:
+        log_callback(f"[*] 已回填注册风控 bot_risk 标记 {updated} 条")
+    return updated
+
+
 def email_registered_successfully(email):
     """数据库或旧账号文件中已有成功/已消耗记录时返回 True。
 
@@ -329,7 +352,37 @@ class EmailDomainRejected(Exception):
 
 
 class RegistrationRiskDenied(Exception):
-    """账号已创建，但服务端将本次注册裁决为 OAuth 不可用。"""
+    """账号已创建，但服务端将本次注册裁决为 OAuth 不可用。
+
+    携带 botFlagSource：它与 access_token 里的 bfs 声明是同一个字段，
+    只是一个来自注册后的账号状态页、一个来自换到的 token。所以注册风控
+    拒绝的账号要和 bfs=1 一样标记 bot_risk，前端才会显示盾牌图标。
+    """
+
+    def __init__(self, message, *, bot_risk=False, bot_flag_source=None, bot_flag_details=""):
+        super().__init__(message)
+        # bot_risk 由抛出点显式给出，不从 bot_flag_source 反推：服务端可能
+        # policy=deny 裁决拒绝而 botFlagSource 仍解析为 0/null，那也是风控标记；
+        # 反过来"sso 为空"这类前置条件失败不是裁决，不能标。
+        self.bot_risk = bool(bot_risk)
+        self.bot_flag_source = bot_flag_source
+        self.bot_flag_details = str(bot_flag_details or "")
+
+
+def apply_risk_bot_flag(cpa_detail: dict, exc) -> bool:
+    """把注册风控拒绝的 botFlagSource 落到 cpa_detail 的 bot_risk / bfs 上。
+
+    persist_registration_result 只从 cpa_detail 读这两个字段，不写就会存成
+    bot_risk=0，前端把被风控的账号显示成普通邮件图标。
+    """
+    if not isinstance(cpa_detail, dict):
+        return False
+    if not getattr(exc, "bot_risk", False):
+        return False
+    source = getattr(exc, "bot_flag_source", None)
+    cpa_detail["bot_risk"] = True
+    cpa_detail["bfs"] = "" if source is None else source
+    return True
 
 
 
@@ -1129,7 +1182,10 @@ def ensure_sso_oauth_eligible(raw_token, email="", log_callback=None) -> dict:
             _append_sso_risk_rejected(email, sso, details, log_callback=log_callback)
             raise RegistrationRiskDenied(
                 "注册风控拒绝，已跳过 OAuth: "
-                f"botFlagSource={source} {details}"
+                f"botFlagSource={source} {details}",
+                bot_risk=True,
+                bot_flag_source=source,
+                bot_flag_details=details,
             )
 
         # 明确读取到非风险状态后即可继续；字段为 null 时继续短时复查，避免注册结果延迟写入。
@@ -2746,6 +2802,11 @@ def run_registration(count):
                         retry = 0
                         if kind == FAIL_RISK:
                             cpa_detail.update(status="rejected", error=str(exc))
+                            if apply_risk_bot_flag(cpa_detail, exc):
+                                registration_log(
+                                    f"[W{wid+1}] [!] 注册风控标记 bot_risk"
+                                    f" botFlagSource={getattr(exc, 'bot_flag_source', None)!r}"
+                                )
                         fail_email = current_attempt_email(email, exc)
                         email_disable_detail = None
                         if kind == FAIL_ALREADY_REGISTERED and is_outlookemail_registration() and fail_email:
@@ -3089,6 +3150,11 @@ def run_registration(count):
                 i += 1
                 if kind == FAIL_RISK:
                     cpa_detail.update(status="rejected", error=str(exc))
+                    if apply_risk_bot_flag(cpa_detail, exc):
+                        registration_log(
+                            "[!] 注册风控标记 bot_risk"
+                            f" botFlagSource={getattr(exc, 'bot_flag_source', None)!r}"
+                        )
                 fail_email = current_attempt_email(email, exc)
                 email_disable_detail = None
                 if kind == FAIL_ALREADY_REGISTERED and is_outlookemail_registration() and fail_email:

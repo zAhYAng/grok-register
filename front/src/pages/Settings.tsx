@@ -3,6 +3,7 @@ import { Link, useSearchParams } from "react-router-dom";
 import {
   ArrowRight,
   Cloud,
+  HelpCircle,
   Mail,
   RefreshCw,
   Save,
@@ -156,6 +157,101 @@ function ConfigField({
       />
       {helper ? <p className="text-xs leading-5 text-muted-foreground">{helper}</p> : null}
     </div>
+  );
+}
+
+function HelpRow({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="grid gap-0.5 sm:grid-cols-[9rem_1fr] sm:gap-3">
+      <div className="font-medium text-slate-700">{label}</div>
+      <div className="text-slate-600">{children}</div>
+    </div>
+  );
+}
+
+function Code({ children }: { children: React.ReactNode }) {
+  return (
+    <code className="rounded bg-slate-100 px-1 py-0.5 font-mono text-[11px] text-slate-800">
+      {children}
+    </code>
+  );
+}
+
+function CloudflareHelp() {
+  return (
+    <details className="group sm:col-span-2 rounded-xl border border-sky-100 bg-sky-50/60 p-3 sm:p-4">
+      <summary className="flex cursor-pointer list-none items-center gap-2 text-sm font-medium text-slate-900">
+        <HelpCircle className="h-4 w-4 shrink-0 text-sky-600" aria-hidden="true" />
+        配置帮助：cloudflare_temp_email 怎么填
+        <span className="ml-auto text-xs font-normal text-slate-500 group-open:hidden">展开</span>
+        <span className="ml-auto hidden text-xs font-normal text-slate-500 group-open:inline">收起</span>
+      </summary>
+
+      <div className="mt-3 space-y-3 text-xs leading-6">
+        <p className="text-slate-600">
+          下面按 <span className="font-medium">dreamhunter2333/cloudflare_temp_email</span> 自建 Worker 的官方文档说明。
+          本项目走 admin 建号 + 地址 JWT 收信这一条链路。
+        </p>
+
+        <div className="space-y-2 rounded-lg bg-white/70 p-3">
+          <HelpRow label="接口地址">
+            Worker 根域名，如 <Code>https://mail.example.com</Code>。
+            只填根地址，<span className="font-medium">不要</span>带 <Code>/api</Code> 或结尾斜杠。
+          </HelpRow>
+          <HelpRow label="API Key / 管理员密码">
+            填后台的 <Code>ADMIN_PASSWORDS</Code>（管理员密码），会作为 <Code>x-admin-auth</Code> 发出。
+            不是站点访问密码，也不是邮箱 JWT。
+          </HelpRow>
+          <HelpRow label="鉴权方式">
+            选<span className="font-medium">「管理员密码 X-Admin-Auth」</span>。
+            建号端点只认这个头；留成「无需鉴权」时只要填了密码也会自动补上，但显式选中更清楚。
+          </HelpRow>
+          <HelpRow label="全局访问密码">
+            仅当 Worker 配了 <Code>PASSWORDS</Code>（整站私有密码）才填，对应 <Code>x-custom-auth</Code>。
+            没开私有站点就留空。
+          </HelpRow>
+          <HelpRow label="收信域名">
+            必须是后台 <Code>DOMAINS</Code> / <Code>DEFAULT_DOMAINS</Code> 里已存在的域名，只填域名本身（
+            <Code>example.com</Code>），不带 <Code>@</Code>。多个用逗号分隔，会轮流使用。
+          </HelpRow>
+        </div>
+
+        <div className="space-y-2 rounded-lg bg-white/70 p-3">
+          <div className="font-medium text-slate-700">四个接口路径（默认值一般不用改）</div>
+          <HelpRow label="创建邮箱">
+            <Code>/admin/new_address</Code> — 官方 admin 建号接口，返回 <Code>address</Code> 和 <Code>jwt</Code>。
+          </HelpRow>
+          <HelpRow label="邮件列表">
+            <Code>/api/mails</Code> — 用上一步的地址 JWT 以 <Code>Bearer</Code> 拉取。
+            该接口只回原始 MIME，本项目会在本地解码后再提验证码。
+            新版 Worker 若有 <Code>/api/parsed_mails</Code>（服务端已解析）也可以填，两种都兼容。
+          </HelpRow>
+          <HelpRow label="域名 / Token">
+            <Code>/api/domains</Code>、<Code>/api/token</Code> 只给非 cloudflare_temp_email 的旧版兼容回退用。
+            自建 cloudflare_temp_email 时这两项用不到，保持默认即可，填错也不影响正常流程。
+          </HelpRow>
+        </div>
+
+        <div className="space-y-2 rounded-lg bg-white/70 p-3">
+          <div className="font-medium text-slate-700">配置错了通常是这几种</div>
+          <HelpRow label="401 / 403">
+            管理员密码不对，或鉴权方式没选 X-Admin-Auth；开了私有站点却没填全局访问密码。
+          </HelpRow>
+          <HelpRow label="404">
+            接口地址多带了 <Code>/api</Code>，或创建邮箱路径被改成了别的值。
+          </HelpRow>
+          <HelpRow label="建号成功但收不到码">
+            邮件列表路径填错，或收信域名不在后台允许列表里（邮件根本没投递进来）。
+          </HelpRow>
+          <HelpRow label="域名相关报错">
+            收信域名带了 <Code>@</Code>，或该域名没在 Worker 后台配置过。
+          </HelpRow>
+          <p className="text-slate-500">
+            填完可以用页面上的连通性检查验证；它探的是建号端点，能区分「鉴权失败」和「服务不可达」。
+          </p>
+        </div>
+      </div>
+    </details>
   );
 }
 
@@ -432,8 +528,9 @@ export function SettingsPage({ section = "registration" }: { section?: SettingsS
 
             {selectedProvider.value === "cloudflare" ? (
               <>
-                <ConfigField {...fieldState} label="接口地址" field="cloudflare_api_base" helper="Cloudflare 临时邮箱 Worker/API 根地址" />
-                <ConfigField {...fieldState} label="API Key / 管理员密码" field="cloudflare_api_key" type="password" />
+                <CloudflareHelp />
+                <ConfigField {...fieldState} label="接口地址" field="cloudflare_api_base" placeholder="https://mail.example.com" helper="Worker 根地址，不要带 /api 或结尾斜杠" />
+                <ConfigField {...fieldState} label="API Key / 管理员密码" field="cloudflare_api_key" type="password" helper="后台 ADMIN_PASSWORDS，作为 x-admin-auth 发送" />
                 <div className="min-w-0 space-y-2">
                   <Label htmlFor="cloudflare_auth_mode">鉴权方式</Label>
                   <Select
@@ -447,11 +544,11 @@ export function SettingsPage({ section = "registration" }: { section?: SettingsS
                   </Select>
                 </div>
                 <ConfigField {...fieldState} label="全局访问密码" field="cloudflare_custom_auth" type="password" helper="对应 Worker PASSWORDS，发送到 X-Custom-Auth" />
-                <ConfigField {...fieldState} label="收信域名" field="defaultDomains" helper="多个域名可用逗号或空格分隔" />
-                <ConfigField {...fieldState} label="域名接口路径" field="cloudflare_path_domains" />
-                <ConfigField {...fieldState} label="创建邮箱接口路径" field="cloudflare_path_accounts" />
-                <ConfigField {...fieldState} label="获取 Token 接口路径" field="cloudflare_path_token" />
-                <ConfigField {...fieldState} label="邮件列表接口路径" field="cloudflare_path_messages" />
+                <ConfigField {...fieldState} label="收信域名" field="defaultDomains" placeholder="example.com" helper="必填，需与后台 DOMAINS 一致；多个用逗号分隔，轮流使用" />
+                <ConfigField {...fieldState} label="创建邮箱接口路径" field="cloudflare_path_accounts" placeholder="/admin/new_address" helper="保持默认 /admin/new_address" />
+                <ConfigField {...fieldState} label="邮件列表接口路径" field="cloudflare_path_messages" placeholder="/api/mails" helper="默认 /api/mails；新版 Worker 可填 /api/parsed_mails" />
+                <ConfigField {...fieldState} label="域名接口路径" field="cloudflare_path_domains" placeholder="/api/domains" helper="仅旧版兼容回退使用，cloudflare_temp_email 用不到" />
+                <ConfigField {...fieldState} label="获取 Token 接口路径" field="cloudflare_path_token" placeholder="/api/token" helper="仅旧版兼容回退使用，cloudflare_temp_email 用不到" />
               </>
             ) : null}
 

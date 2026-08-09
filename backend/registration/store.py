@@ -590,6 +590,25 @@ class RegistrationRepository:
             )
             return int(cursor.rowcount or 0)
 
+    def backfill_registration_risk_bot_risk(self) -> int:
+        """把历史 registration_risk 失败记录补上 bot_risk 标记。
+
+        只认 failure_reason 里带 botFlagSource 的行——那是服务端真正下了风控裁决
+        的记录。registration_risk 也覆盖"sso 为空"这类前置条件失败，那些不是
+        机器人标记，不能一并标上。
+        """
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE registration_results
+                SET bot_risk = 1
+                WHERE failure_type = 'registration_risk'
+                  AND COALESCE(bot_risk, 0) = 0
+                  AND failure_reason LIKE '%botFlagSource%'
+                """
+            )
+            return int(cursor.rowcount or 0)
+
     def update_remote_import_status(
         self,
         account_id: int,

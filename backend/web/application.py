@@ -685,6 +685,7 @@ def create_app() -> FastAPI:
         try:
             gr.get_registration_repository()
             gr.backfill_access_token_bot_risk()
+            gr.backfill_registration_risk_bot_risk()
         except Exception as exc:
             print(f"[web] 初始化 SQLite 失败: {exc}", flush=True)
 

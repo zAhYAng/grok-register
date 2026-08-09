@@ -120,6 +120,45 @@ class CloudflareConnectivityTests(unittest.TestCase):
         http_get.assert_not_called()
         http_post.assert_not_called()
 
+    def test_admin_create_sends_x_admin_auth_even_when_mode_none(self):
+        # /admin/new_address 在官方文档里要求 x-admin-auth。
+        # 即使 UI 把 auth_mode 留成 none，只要配了管理员密码也应带上该头。
+        from backend.mailbox import cloudflare_worker as cf
+
+        captured = {}
+
+        class FakeResp:
+            status_code = 200
+            text = "{}"
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"address": "demo@example.com", "jwt": "jwt-token"}
+
+        def http_post(url, **kwargs):
+            captured["url"] = url
+            captured["headers"] = dict(kwargs.get("headers") or {})
+            captured["json"] = dict(kwargs.get("json") or {})
+            return FakeResp()
+
+        address, token = cf.create_temp_address(
+            http_post,
+            "https://temp-mail.example.com",
+            accounts_path="/admin/new_address",
+            api_key="admin-secret",
+            auth_mode="none",
+            name="demo",
+        )
+
+        self.assertEqual(address, "demo@example.com")
+        self.assertEqual(token, "jwt-token")
+        self.assertTrue(captured["url"].endswith("/admin/new_address"))
+        self.assertEqual(captured["headers"].get("x-admin-auth"), "admin-secret")
+        self.assertEqual(captured["json"].get("name"), "demo")
+        self.assertTrue(captured["json"].get("enablePrefix"))
+
     def test_fallback_preserves_both_errors(self):
         engine.config.update(
             {
