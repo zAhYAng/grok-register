@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { ArrowLeft, CheckCircle2, Copy, History, Search, Trash2, XCircle } from "lucide-react";
-import { Badge, Button, Card, EmptyState, Input, PageHeader, PaginationBar, Toast } from "@/components/ui";
+import { CheckCircle2, Copy, History, Search, Trash2, XCircle } from "lucide-react";
+import { Badge, Button, Card, EmptyState, Input, PageHeader, PaginationBar, Select, Toast } from "@/components/ui";
+import { AccountPageContext } from "@/components/AccountPageContext";
 import { buildReloginReportText } from "@/components/ReloginReportDialog";
 import {
   clearReloginHistory,
@@ -114,15 +115,7 @@ export function ReloginHistoryPage() {
   if (runId) {
     return (
       <div className="space-y-5">
-        <div>
-          <Link
-            to="/accounts/relogin/history"
-            className="inline-flex items-center gap-2 text-sm font-medium text-slate-600 hover:text-slate-950"
-          >
-            <ArrowLeft className="h-4 w-4" aria-hidden="true" />
-            返回登录历史
-          </Link>
-        </div>
+        <AccountPageContext crumbs={[{ label: "重新登录", to: "/accounts/relogin" }, { label: "登录历史", to: "/accounts/relogin/history" }, { label: "报告" }]} backTo="/accounts/relogin/history" backLabel="返回历史列表" />
         {!selected ? (
           <Card className="p-5">
             <EmptyState title="报告不存在" description="该记录可能已被删除，或者浏览器数据已被清理。" />
@@ -243,6 +236,7 @@ export function ReloginHistoryPage() {
 
   return (
     <div className="space-y-5">
+      <AccountPageContext crumbs={[{ label: "重新登录", to: "/accounts/relogin" }, { label: "登录历史" }]} />
       <PageHeader
         title="登录历史"
         description="重新登录报告保存在当前浏览器 IndexedDB，可随时查看、复制或删除。"
@@ -268,22 +262,11 @@ export function ReloginHistoryPage() {
             <Search className="pointer-events-none absolute left-3 top-3.5 h-4 w-4 text-slate-400" aria-hidden="true" />
             <Input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索报告中的邮箱" className="pl-9" />
           </div>
-          <div className="grid grid-cols-3 gap-1 rounded-lg bg-slate-100 p-1 md:w-auto">
-            {([
-              ["all", "全部"],
-              ["success", "完全成功"],
-              ["failed", "包含失败"],
-            ] as const).map(([value, label]) => (
-              <button
-                key={value}
-                type="button"
-                onClick={() => setFilter(value)}
-                className={`min-h-9 rounded-md px-3 text-xs font-medium ${filter === value ? "bg-white text-slate-950 shadow-sm" : "text-slate-500"}`}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
+          <Select value={filter} onChange={(event) => setFilter(event.target.value as typeof filter)} className="md:w-44" aria-label="筛选登录历史">
+            <option value="all">全部报告</option>
+            <option value="success">完全成功</option>
+            <option value="failed">包含失败</option>
+          </Select>
         </div>
       </Card>
 

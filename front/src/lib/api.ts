@@ -17,6 +17,29 @@ export type JobStatus = {
   batch_id?: string;
 };
 
+export type SsoRiskCheck = {
+  enabled?: boolean;
+  mode?: string;
+  valid_session?: boolean;
+  email_match?: boolean | null;
+  verdict?: string;
+  found?: boolean;
+  flagged?: boolean;
+  bot_flag_source?: number | string | null;
+  bot_flag_details?: string;
+  policy?: string;
+  risk?: number | null;
+  event?: string;
+  denied?: boolean;
+  error?: string;
+  checked_at?: string;
+  response_ms?: number;
+  account?: {
+    email?: string;
+    display_name?: string;
+  };
+};
+
 export type AccountRecord = {
   id: number;
   email: string;
@@ -62,6 +85,15 @@ export type AccountRecord = {
   sso_saved: boolean;
   bot_risk?: boolean;
   bfs?: string | number | null;
+  sso_risk_check?: SsoRiskCheck | null;
+  monitor_delivery?: {
+    event_id: string;
+    status: string;
+    attempts: number;
+    last_attempt_at: string;
+    delivered_at: string;
+    last_error: string;
+  };
   extra?: Record<string, unknown>;
 };
 
@@ -129,6 +161,43 @@ export type ReloginStatus = {
   failed_count: number;
   run_id: string;
   items: ReloginItem[];
+};
+
+export type SsoCheckItemStatus = "pending" | "clean" | "flagged" | "unknown" | "failed";
+
+export type SsoCheckItem = {
+  account_id: number;
+  email: string;
+  status: SsoCheckItemStatus;
+  verdict: string;
+  bot_flag_source: number | string | null;
+  valid_session: boolean;
+  email_match: boolean | null;
+  policy: string;
+  risk: number | null;
+  event: string;
+  checked_at: string;
+  response_ms: number;
+  attempts?: number;
+  error: string;
+};
+
+export type SsoCheckStatus = {
+  running: boolean;
+  account_id: number;
+  email: string;
+  stage: string;
+  error: string;
+  started_at?: number | null;
+  finished_at?: number | null;
+  total_count: number;
+  completed_count: number;
+  clean_count: number;
+  flagged_count: number;
+  unknown_count: number;
+  failed_count: number;
+  run_id: string;
+  items: SsoCheckItem[];
 };
 
 export type AuthArchiveDownload = {
@@ -259,6 +328,40 @@ export const api = {
       `/api/accounts${qs ? `?${qs}` : ""}`
     );
   },
+  accountIds: (
+    params: {
+      status?: string;
+      emailDisableStatus?: string;
+      q?: string;
+      batchId?: string;
+      botRisk?: string;
+    } = {}
+  ) => {
+    const sp = new URLSearchParams();
+    if (params.status) sp.set("status", params.status);
+    if (params.emailDisableStatus) sp.set("email_disable_status", params.emailDisableStatus);
+    if (params.q) sp.set("q", params.q);
+    if (params.batchId) sp.set("batch_id", params.batchId);
+    if (params.botRisk) sp.set("bot_risk", params.botRisk);
+    const qs = sp.toString();
+    return request<{ ok: boolean; ids: number[]; total: number }>(
+      `/api/accounts/select-ids${qs ? `?${qs}` : ""}`
+    );
+  },
+  actionableAccountIds: (
+    action: "relogin" | "sso_check" | "auth_export",
+    q = "",
+    botRisk = "",
+    kind?: AuthKind
+  ) => {
+    const sp = new URLSearchParams({ action });
+    if (q) sp.set("q", q);
+    if (botRisk) sp.set("bot_risk", botRisk);
+    if (kind) sp.set("kind", kind);
+    return request<{ ok: boolean; ids: number[]; total: number }>(
+      `/api/accounts/actionable-ids?${sp.toString()}`
+    );
+  },
   account: (id: number) => request<{ ok: boolean; item: AccountRecord }>(`/api/accounts/${id}`),
   accountAuthJson: (id: number, kind: AuthKind) =>
     request<{ ok: boolean; kind: AuthKind; path: string; content: string }>(
@@ -278,6 +381,18 @@ export const api = {
     }),
   reloginStatus: () =>
     request<{ ok: boolean; relogin: ReloginStatus }>("/api/accounts/relogin/status"),
+  startSsoCheck: (ids: number[]) =>
+    request<{ ok: boolean; sso_check: SsoCheckStatus }>("/api/accounts/sso-check", {
+      method: "POST",
+      body: JSON.stringify({ ids }),
+    }),
+  prepareSsoCheck: (ids: number[]) =>
+    request<{ ok: boolean; ids: number[]; missing: number[]; unavailable: number[] }>("/api/accounts/sso-check/prepare", {
+      method: "POST",
+      body: JSON.stringify({ ids }),
+    }),
+  ssoCheckStatus: () =>
+    request<{ ok: boolean; sso_check: SsoCheckStatus }>("/api/accounts/sso-check/status"),
   importAccountToGrok2API: (id: number) =>
     request<{
       ok: boolean;

@@ -4,6 +4,11 @@ import { Activity, Database, LogOut, Menu, MoreHorizontal, PanelLeftClose, Panel
 import { mobilePrimaryItems, navigationGroups, navigationItems } from "@/app/navigation";
 import { cn } from "@/lib/utils";
 
+function navigationActive(pathname: string, to: string) {
+  if (to === "/accounts") return pathname === to;
+  return pathname === to || pathname.startsWith(`${to}/`);
+}
+
 function StatusPill({ running, compact = false }: { running?: boolean; compact?: boolean }) {
   return (
     <div
@@ -35,30 +40,31 @@ function Brand() {
 }
 
 function NavigationContent({ onNavigate, collapsed = false }: { onNavigate?: () => void; collapsed?: boolean }) {
+  const location = useLocation();
   return (
     <nav className="flex flex-col gap-5" aria-label="主导航">
       {navigationGroups.map((group) => (
         <section key={group.label}>
           {collapsed ? <div className="mx-2 mb-2 border-t border-slate-100" /> : <div className="mb-1.5 px-3 text-[11px] font-medium uppercase tracking-[0.08em] text-slate-400">{group.label}</div>}
-          <div className="space-y-0.5">
+          <div className={cn("space-y-0.5", group.label === "账号中心" && !collapsed && "border-l border-slate-200 pl-2")}>
             {group.items.map((item) => {
               const Icon = item.icon;
+              const active = navigationActive(location.pathname, item.to);
               return (
                 <NavLink
                   key={item.to}
                   to={item.to}
-                  end={item.to !== "/accounts/relogin/history"}
+                  end={item.to === "/accounts"}
                   onClick={onNavigate}
                   title={collapsed ? item.label : undefined}
-                  className={({ isActive }) =>
-                    cn(
-                      "relative flex min-h-10 items-center gap-3 rounded-lg px-3 text-sm transition-colors",
-                      collapsed && "justify-center px-2",
-                      isActive
-                        ? "bg-sky-50 font-medium text-sky-700"
-                        : "text-slate-600 hover:bg-slate-50 hover:text-slate-950"
-                    )
-                  }
+                  aria-current={active ? "page" : undefined}
+                  className={cn(
+                    "relative flex min-h-10 items-center gap-3 rounded-lg px-3 text-sm transition-colors",
+                    collapsed && "justify-center px-2",
+                    active
+                      ? "bg-sky-50 font-medium text-sky-700"
+                      : "text-slate-600 hover:bg-slate-50 hover:text-slate-950"
+                  )}
                 >
                   <Icon className="h-4 w-4 shrink-0" strokeWidth={1.8} aria-hidden="true" />
                   <span className={cn("truncate", collapsed && "sr-only")}>{item.label}</span>
@@ -90,7 +96,7 @@ export function Layout({ jobRunning, onLogout }: { jobRunning?: boolean; onLogou
     [location.pathname]
   );
   const primaryActive = mobilePrimaryItems.some(
-    (item) => location.pathname === item.to || location.pathname.startsWith(`${item.to}/`)
+    (item) => navigationActive(location.pathname, item.to)
   );
 
   useEffect(() => setMobileMenuOpen(false), [location.pathname]);
@@ -266,17 +272,17 @@ export function Layout({ jobRunning, onLogout }: { jobRunning?: boolean; onLogou
       >
         {mobilePrimaryItems.map((item) => {
           const Icon = item.icon;
+          const active = navigationActive(location.pathname, item.to);
           return (
             <NavLink
               key={item.to}
               to={item.to}
               end={item.to === "/accounts"}
-              className={({ isActive }) =>
-                cn(
-                  "flex min-h-[62px] flex-col items-center justify-center gap-1 text-[11px] font-medium",
-                  isActive ? "text-sky-600" : "text-slate-500"
-                )
-              }
+              aria-current={active ? "page" : undefined}
+              className={cn(
+                "flex min-h-[62px] flex-col items-center justify-center gap-1 text-[11px] font-medium",
+                active ? "text-sky-600" : "text-slate-500"
+              )}
             >
               <Icon className="h-5 w-5" strokeWidth={1.8} aria-hidden="true" />
               <span>{item.shortLabel}</span>

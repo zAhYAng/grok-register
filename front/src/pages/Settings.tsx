@@ -3,12 +3,15 @@ import { Link, useSearchParams } from "react-router-dom";
 import {
   ArrowRight,
   Cloud,
+  Eye,
+  EyeOff,
   HelpCircle,
   Mail,
   RefreshCw,
   Save,
   Settings2,
   ShieldCheck,
+  Webhook,
 } from "lucide-react";
 import { api } from "@/lib/api";
 import {
@@ -59,10 +62,15 @@ const PROVIDERS = [
     description: "适合自建 cloud-mail，需要站点地址、管理员账号和域名。",
   },
 ];
-export type SettingsSection = "registration" | "cpa" | "grok2api" | "mail" | "outlook";
+// cpa / grok2api 保留类型仅为兼容；路由已重定向到 tokenauth
+export type SettingsSection = "registration" | "tokenauth" | "cpa" | "grok2api" | "mail" | "outlook";
 
 const SECTION_META: Record<SettingsSection, { title: string; description: string }> = {
   registration: { title: "注册设置", description: "注册数量、代理、浏览器语言与运行方式。" },
+  tokenauth: {
+    title: "TokenAuth",
+    description: "SSO 授权转换与下游上传目标（CPA / Grok2API / Sub2API）。",
+  },
   cpa: { title: "CPA / Auth", description: "配置 SSO 授权转换、Token 模式与 CPA 入库目标。" },
   grok2api: { title: "Grok2API", description: "维护本地授权目录、远程管理端与自动导入。" },
   mail: { title: "邮箱服务", description: "选择邮箱服务商并维护对应接口与访问凭据。" },
@@ -136,25 +144,41 @@ function ConfigField({
   placeholder?: string;
   helper?: string;
 }) {
+  const [showSecret, setShowSecret] = useState(false);
+  const isPassword = type === "password";
   return (
     <div className="min-w-0 space-y-2">
       <Label htmlFor={field}>{label}</Label>
-      <Input
-        id={field}
-        type={type}
-        inputMode={type === "number" ? "numeric" : undefined}
-        autoComplete={type === "password" ? "new-password" : "off"}
-        placeholder={placeholder}
-        value={config[field] ?? ""}
-        onChange={(event) =>
-          onFieldChange(
-            field,
-            type === "number" && event.target.value !== ""
-              ? Number(event.target.value)
-              : event.target.value
-          )
-        }
-      />
+      <div className="relative">
+        <Input
+          id={field}
+          type={isPassword && showSecret ? "text" : type}
+          inputMode={type === "number" ? "numeric" : undefined}
+          autoComplete={isPassword ? "new-password" : "off"}
+          className={isPassword ? "pr-10" : undefined}
+          placeholder={placeholder}
+          value={config[field] ?? ""}
+          onChange={(event) =>
+            onFieldChange(
+              field,
+              type === "number" && event.target.value !== ""
+                ? Number(event.target.value)
+                : event.target.value
+            )
+          }
+        />
+        {isPassword ? (
+          <button
+            type="button"
+            className="absolute inset-y-0 right-0 flex w-10 items-center justify-center text-muted-foreground transition hover:text-foreground"
+            aria-label={showSecret ? `隐藏${label}` : `显示${label}`}
+            aria-pressed={showSecret}
+            onClick={() => setShowSecret((value) => !value)}
+          >
+            {showSecret ? <EyeOff className="h-4 w-4" aria-hidden="true" /> : <Eye className="h-4 w-4" aria-hidden="true" />}
+          </button>
+        ) : null}
+      </div>
       {helper ? <p className="text-xs leading-5 text-muted-foreground">{helper}</p> : null}
     </div>
   );
@@ -371,7 +395,14 @@ export function SettingsPage({ section = "registration" }: { section?: SettingsS
                 <ArrowRight className="h-4 w-4" aria-hidden="true" />
               </Link>
             </div>
-            <ConfigField {...fieldState} label="网络代理" field="proxy" placeholder="http://127.0.0.1:7890" />
+            <ConfigField
+              {...fieldState}
+              label="网络代理"
+              field="proxy"
+              type="password"
+              placeholder="http://user:password@host:port"
+              helper="支持无认证或用户名/密码认证的 HTTP(S) 代理；凭据含 @、:、/、#、% 等特殊字符时请使用 URL 百分号编码，例如 @ 写成 %40。注册浏览器与 xAI/OAuth 请求会共用此代理。"
+            />
             <ConfigField {...fieldState}
               label="账号间隔（秒）"
               field="account_interval"
@@ -425,9 +456,9 @@ export function SettingsPage({ section = "registration" }: { section?: SettingsS
         </Card>
         ) : null}
 
-        {section === "cpa" || section === "grok2api" ? (
+        {/* TokenAuth：授权转换 + CPA / Grok2API / Sub2API 三目标 */}
+        {section === "tokenauth" || section === "cpa" || section === "grok2api" ? (
         <div className="space-y-4">
-          {section === "cpa" ? (
           <Card>
             <CardHeader className="flex-row items-start gap-3">
               <SectionIcon><ShieldCheck className="h-5 w-5" aria-hidden="true" /></SectionIcon>
@@ -445,6 +476,14 @@ export function SettingsPage({ section = "registration" }: { section?: SettingsS
                   onCheckedChange={(value) => setField("cpa_auto_add", value)}
                 />
               </div>
+              <div className="sm:col-span-2">
+                <ToggleRow
+                  title="SSO 详细风控检查"
+                  description="获取并解析 SSO 后检查账号页；botFlagSource=0 正常，非 0 标记异常，缺失时自动重试"
+                  checked={!!config.sso_detailed_risk_check}
+                  onCheckedChange={(value) => setField("sso_detailed_risk_check", value)}
+                />
+              </div>
               <div className="space-y-2 sm:col-span-2">
                 <Label htmlFor="cpa_token_mode">授权转换方式</Label>
                 <Select
@@ -457,49 +496,163 @@ export function SettingsPage({ section = "registration" }: { section?: SettingsS
               </div>
             </CardContent>
           </Card>
-          ) : null}
 
           <div className="grid gap-4">
-            {section === "cpa" ? (
             <Card>
               <CardHeader>
                 <CardTitle>CPA 目标</CardTitle>
                 <CardDescription>保存本地 CPA JSON，也可上传到远程 Management API。</CardDescription>
               </CardHeader>
               <CardContent className="grid gap-4">
+                <ToggleRow
+                  title="上传到 CPA"
+                  description="本地目录总会写入；开关只控制是否 POST 到远程 Management API"
+                  checked={config.cpa_upload_enabled !== false}
+                  onCheckedChange={(value) => setField("cpa_upload_enabled", value)}
+                />
                 <ConfigField {...fieldState} label="本地授权目录" field="cpa_auth_dir" />
                 <ConfigField {...fieldState} label="远程 CPA 地址" field="cpa_remote_url" placeholder="http://host:8317" />
                 <ConfigField {...fieldState} label="远程管理密钥" field="cpa_management_key" type="password" />
               </CardContent>
             </Card>
-            ) : null}
 
-            {section === "grok2api" ? (
+            <div className="grid gap-4 lg:grid-cols-2">
+              <Card>
+                <CardHeader>
+                  <CardTitle>Grok2API 目标</CardTitle>
+                  <CardDescription>保存 Grok Build、Grok Web、Grok Console 三种 JSON，并通过管理员账号登录远程服务导入。</CardDescription>
+                </CardHeader>
+                <CardContent className="grid gap-4">
+                  <ConfigField {...fieldState} label="本地授权目录" field="grok2api_auth_dir" />
+                  <ConfigField
+                    {...fieldState}
+                    label="远程 API 地址"
+                    field="grok2api_remote_url"
+                    placeholder="https://api.example.com"
+                    helper="填写站点根地址，不要附加 /api/admin/v1"
+                  />
+                  <ConfigField {...fieldState} label="管理员账号" field="grok2api_remote_username" />
+                  <ConfigField {...fieldState} label="管理员密码" field="grok2api_remote_password" type="password" />
+                  <ToggleRow
+                    title="转换成功后自动导入"
+                    description="生成三种 Grok2API JSON 后立即登录远程管理端并逐个导入；导入结果单独记录"
+                    checked={!!config.grok2api_auto_import}
+                    onCheckedChange={(value) => setField("grok2api_auto_import", value)}
+                  />
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader className="flex-row items-start gap-3">
+                  <SectionIcon><Webhook className="h-5 w-5" aria-hidden="true" /></SectionIcon>
+                  <div>
+                    <CardTitle>账号监控 Webhook</CardTitle>
+                    <CardDescription>
+                      仅在 grok_build 导入成功后发送账号已导入事件；注册机不查询监控处理结果。
+                    </CardDescription>
+                  </div>
+                </CardHeader>
+                <CardContent className="grid gap-4">
+                  <ToggleRow
+                    title="启用账号监控联动"
+                    description="自动导入与账号页手动导入共用同一持久通知队列"
+                    checked={!!config.monitor_webhook_enabled}
+                    onCheckedChange={(value) => setField("monitor_webhook_enabled", value)}
+                  />
+                  <ConfigField
+                    {...fieldState}
+                    label="Webhook URL"
+                    field="monitor_webhook_url"
+                    placeholder="http://monitor-backend:8090/api/integrations/grok-register/account-imported"
+                    helper="统一 Compose 内使用 monitor-backend 容器名；独立部署可填写监控服务内网地址"
+                  />
+                  <ConfigField
+                    {...fieldState}
+                    label="联动 Token"
+                    field="monitor_webhook_token"
+                    type="password"
+                  />
+                  <ConfigField
+                    {...fieldState}
+                    label="请求超时（秒）"
+                    field="monitor_webhook_timeout_seconds"
+                    type="number"
+                    helper="注册机只判断 Webhook 是否收到 HTTP 2xx，不读取后续探针或风险结果"
+                  />
+                </CardContent>
+              </Card>
+            </div>
+
             <Card>
               <CardHeader>
-                <CardTitle>Grok2API 目标</CardTitle>
-                <CardDescription>保存 Grok Build、Grok Web、Grok Console 三种 JSON，并通过管理员账号登录远程服务导入。</CardDescription>
+                <CardTitle>Sub2API 目标</CardTitle>
+                <CardDescription>
+                  注册拿到 SSO 后直传 Sub2API；服务端自行将 SSO 换成 Build OAuth token 并建号。
+                </CardDescription>
               </CardHeader>
-              <CardContent className="grid gap-4">
-                <ConfigField {...fieldState} label="本地授权目录" field="grok2api_auth_dir" />
+              <CardContent className="grid gap-4 sm:grid-cols-2">
+                <div className="sm:col-span-2">
+                  <ToggleRow
+                    title="上传到 Sub2API"
+                    description="开启后，每条 SSO 会调用 POST /api/v1/admin/grok/sso-to-oauth；失败不影响注册成功判定"
+                    checked={!!config.sub2api_enabled}
+                    onCheckedChange={(value) => setField("sub2api_enabled", value)}
+                  />
+                </div>
                 <ConfigField
                   {...fieldState}
-                  label="远程 API 地址"
-                  field="grok2api_remote_url"
-                  placeholder="https://api.example.com"
-                  helper="填写站点根地址，不要附加 /api/admin/v1"
+                  label="站点根地址"
+                  field="sub2api_remote_url"
+                  placeholder="http://host:8080"
+                  helper="不要附加 /api/v1"
                 />
-                <ConfigField {...fieldState} label="管理员账号" field="grok2api_remote_username" />
-                <ConfigField {...fieldState} label="管理员密码" field="grok2api_remote_password" type="password" />
-                <ToggleRow
-                  title="转换成功后自动导入"
-                  description="生成三种 Grok2API JSON 后立即登录远程管理端并逐个导入；导入结果单独记录"
-                  checked={!!config.grok2api_auto_import}
-                  onCheckedChange={(value) => setField("grok2api_auto_import", value)}
+                <ConfigField
+                  {...fieldState}
+                  label="Admin API Key"
+                  field="sub2api_api_key"
+                  type="password"
+                  helper="Sub2API 后台生成的 Admin API Key，以 x-api-key 头发送"
                 />
+                <ConfigField
+                  {...fieldState}
+                  label="分组 ID"
+                  field="sub2api_group_ids"
+                  placeholder="1,2"
+                  helper="分组 ID，多个用逗号分隔；留空不分组"
+                />
+                <ConfigField
+                  {...fieldState}
+                  label="代理 ID"
+                  field="sub2api_proxy_id"
+                  type="number"
+                  helper="代理 ID，0 或留空表示不使用代理"
+                />
+                <ConfigField
+                  {...fieldState}
+                  label="调度并发"
+                  field="sub2api_concurrency"
+                  type="number"
+                  helper="Sub2API 侧调度并发，默认 1"
+                />
+                <ConfigField
+                  {...fieldState}
+                  label="调度优先级"
+                  field="sub2api_priority"
+                  type="number"
+                  helper="调度优先级，默认 0"
+                />
+                <ConfigField
+                  {...fieldState}
+                  label="账号名前缀"
+                  field="sub2api_name_prefix"
+                  helper="可选，账号名前缀；留空由 Sub2API 自动命名"
+                />
+                <p className="sm:col-span-2 text-xs leading-5 text-muted-foreground">
+                  上传走 <code className="rounded bg-muted px-1 py-0.5">POST {"{url}"}/api/v1/admin/grok/sso-to-oauth</code>，
+                  Sub2API 服务端会自行将 SSO 换成 Build OAuth token 并建号。
+                </p>
               </CardContent>
             </Card>
-            ) : null}
           </div>
         </div>
         ) : null}

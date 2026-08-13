@@ -40,6 +40,9 @@ RESULT_COLUMNS = (
     "grok2api_remote_status",
     "grok2api_remote_imported_at",
     "grok2api_remote_error",
+    "sub2api_remote_status",
+    "sub2api_remote_imported_at",
+    "sub2api_remote_error",
     "email_account_id",
     "email_disable_status",
     "email_disabled_at",
@@ -114,6 +117,9 @@ class RegistrationRepository:
                     grok2api_remote_status TEXT NOT NULL DEFAULT 'not_configured',
                     grok2api_remote_imported_at TEXT NOT NULL DEFAULT '',
                     grok2api_remote_error TEXT NOT NULL DEFAULT '',
+                    sub2api_remote_status TEXT NOT NULL DEFAULT 'disabled',
+                    sub2api_remote_imported_at TEXT NOT NULL DEFAULT '',
+                    sub2api_remote_error TEXT NOT NULL DEFAULT '',
                     email_account_id TEXT NOT NULL DEFAULT '',
                     email_disable_status TEXT NOT NULL DEFAULT 'not_attempted',
                     email_disabled_at TEXT NOT NULL DEFAULT '',
@@ -137,6 +143,30 @@ class RegistrationRepository:
                     ON registration_results(status);
                 CREATE INDEX IF NOT EXISTS idx_registration_results_batch
                     ON registration_results(batch_id);
+
+                CREATE TABLE IF NOT EXISTS account_monitor_outbox (
+                    event_id TEXT PRIMARY KEY,
+                    registration_id INTEGER NOT NULL UNIQUE,
+                    event_type TEXT NOT NULL DEFAULT 'grok2api.account_imported',
+                    email TEXT NOT NULL,
+                    bot_risk INTEGER NOT NULL DEFAULT 0,
+                    bfs TEXT NOT NULL DEFAULT '',
+                    occurred_at TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    next_attempt_at REAL NOT NULL DEFAULT 0,
+                    last_attempt_at TEXT NOT NULL DEFAULT '',
+                    delivered_at TEXT NOT NULL DEFAULT '',
+                    last_error TEXT NOT NULL DEFAULT '',
+                    response_json TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL DEFAULT ''
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_account_monitor_outbox_due
+                    ON account_monitor_outbox(status, next_attempt_at);
+                CREATE INDEX IF NOT EXISTS idx_account_monitor_outbox_email
+                    ON account_monitor_outbox(email COLLATE NOCASE);
                 """
             )
             existing_columns = {
@@ -157,6 +187,9 @@ class RegistrationRepository:
                 "grok2api_remote_status": "TEXT NOT NULL DEFAULT 'not_configured'",
                 "grok2api_remote_imported_at": "TEXT NOT NULL DEFAULT ''",
                 "grok2api_remote_error": "TEXT NOT NULL DEFAULT ''",
+                "sub2api_remote_status": "TEXT NOT NULL DEFAULT 'disabled'",
+                "sub2api_remote_imported_at": "TEXT NOT NULL DEFAULT ''",
+                "sub2api_remote_error": "TEXT NOT NULL DEFAULT ''",
                 "bot_risk": "INTEGER NOT NULL DEFAULT 0",
                 "bfs": "TEXT NOT NULL DEFAULT ''",
             }
@@ -218,7 +251,7 @@ class RegistrationRepository:
                 """,
                 (self.now_text(),),
             )
-            conn.execute("PRAGMA user_version = 6")
+            conn.execute("PRAGMA user_version = 7")
 
     def add_result(self, record: Dict[str, Any]) -> int:
         now = self.now_text()
@@ -259,6 +292,13 @@ class RegistrationRepository:
                 record.get("grok2api_remote_imported_at") or ""
             ),
             "grok2api_remote_error": str(record.get("grok2api_remote_error") or ""),
+            "sub2api_remote_status": str(
+                record.get("sub2api_remote_status") or "disabled"
+            ),
+            "sub2api_remote_imported_at": str(
+                record.get("sub2api_remote_imported_at") or ""
+            ),
+            "sub2api_remote_error": str(record.get("sub2api_remote_error") or ""),
             "email_account_id": str(record.get("email_account_id") or ""),
             "email_disable_status": str(
                 record.get("email_disable_status") or "not_attempted"
@@ -283,6 +323,184 @@ class RegistrationRepository:
                 normalized,
             )
             return int(cursor.lastrowid)
+
+    def enqueue_account_monitor_event(
+        self,
+        *,
+        registration_id: int,
+        email: str,
+        bot_risk: bool,
+        bfs: Any,
+        occurred_at: str,
+    ) -> Dict[str, Any]:
+        """Create one durable, idempotent account-imported notification."""
+
+        normalized_id = int(registration_id)
+        if normalized_id <= 0:
+            raise ValueError("registration_id 必须是正整数")
+        normalized_email = str(email or "").strip().lower()
+        if "@" not in normalized_email:
+            raise ValueError("账号监控通知缺少有效邮箱")
+        event_id = f"registration:{normalized_id}:grok2api-imported"
+        now_text = self.now_text()
+        now_epoch = _datetime.datetime.now().timestamp()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO account_monitor_outbox (
+                    event_id, registration_id, event_type, email, bot_risk, bfs,
+                    occurred_at, status, attempts,
+                    next_attempt_at, created_at, updated_at
+                ) VALUES (?, ?, 'grok2api.account_imported', ?, ?, ?, ?,
+                          'pending', 0, ?, ?, ?)
+                """,
+                (
+                    event_id,
+                    normalized_id,
+                    normalized_email,
+                    1 if bot_risk else 0,
+                    "" if bfs is None else str(bfs),
+                    str(occurred_at or ""),
+                    now_epoch,
+                    now_text,
+                    now_text,
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM account_monitor_outbox WHERE event_id = ?",
+                (event_id,),
+            ).fetchone()
+        return dict(row) if row is not None else {}
+
+    def recover_account_monitor_deliveries(self) -> int:
+        now_text = self.now_text()
+        now_epoch = _datetime.datetime.now().timestamp()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE account_monitor_outbox
+                SET status = 'pending', next_attempt_at = ?, updated_at = ?
+                WHERE status = 'delivering'
+                """,
+                (now_epoch, now_text),
+            )
+            return int(cursor.rowcount or 0)
+
+    def claim_account_monitor_delivery(self) -> Dict[str, Any] | None:
+        now_epoch = _datetime.datetime.now().timestamp()
+        now_text = self.now_text()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """
+                SELECT *
+                FROM account_monitor_outbox
+                WHERE status = 'pending' AND next_attempt_at <= ?
+                ORDER BY next_attempt_at ASC, created_at ASC
+                LIMIT 1
+                """,
+                (now_epoch,),
+            ).fetchone()
+            if row is None:
+                return None
+            cursor = conn.execute(
+                """
+                UPDATE account_monitor_outbox
+                SET status = 'delivering', attempts = attempts + 1,
+                    last_attempt_at = ?, updated_at = ?
+                WHERE event_id = ? AND status = 'pending'
+                """,
+                (now_text, now_text, row["event_id"]),
+            )
+            if not cursor.rowcount:
+                return None
+            claimed = conn.execute(
+                "SELECT * FROM account_monitor_outbox WHERE event_id = ?",
+                (row["event_id"],),
+            ).fetchone()
+        return dict(claimed) if claimed is not None else None
+
+    def retry_account_monitor_delivery(
+        self,
+        event_id: str,
+        *,
+        error: str,
+        delay_seconds: float,
+        response_json: str = "",
+    ) -> None:
+        now_text = self.now_text()
+        next_attempt = _datetime.datetime.now().timestamp() + max(
+            float(delay_seconds), 1.0
+        )
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE account_monitor_outbox
+                SET status = 'pending', next_attempt_at = ?, last_error = ?,
+                    response_json = ?, updated_at = ?
+                WHERE event_id = ? AND status != 'delivered'
+                """,
+                (
+                    next_attempt,
+                    str(error or "")[:4000],
+                    str(response_json or "")[:16000],
+                    now_text,
+                    str(event_id),
+                ),
+            )
+
+    def complete_account_monitor_delivery(
+        self,
+        event_id: str,
+    ) -> None:
+        now_text = self.now_text()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE account_monitor_outbox
+                SET status = 'delivered', delivered_at = ?, last_error = '',
+                    response_json = '', updated_at = ?
+                WHERE event_id = ?
+                """,
+                (
+                    now_text,
+                    now_text,
+                    str(event_id),
+                ),
+            )
+
+    def account_monitor_deliveries(
+        self, registration_ids: Iterable[int | str]
+    ) -> Dict[int, Dict[str, Any]]:
+        ids: List[int] = []
+        seen = set()
+        for raw in registration_ids or []:
+            try:
+                value = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if value <= 0 or value in seen:
+                continue
+            seen.add(value)
+            ids.append(value)
+        if not ids:
+            return {}
+        result: Dict[int, Dict[str, Any]] = {}
+        with self._connect() as conn:
+            for start in range(0, len(ids), SQLITE_IN_BATCH_SIZE):
+                batch = ids[start : start + SQLITE_IN_BATCH_SIZE]
+                placeholders = ", ".join("?" for _ in batch)
+                rows = conn.execute(
+                    f"""
+                    SELECT * FROM account_monitor_outbox
+                    WHERE registration_id IN ({placeholders})
+                    """,
+                    batch,
+                ).fetchall()
+                result.update(
+                    {int(row["registration_id"]): dict(row) for row in rows}
+                )
+        return result
 
     def has_success(self, email: str) -> bool:
         normalized = str(email or "").strip()
@@ -348,9 +566,24 @@ class RegistrationRepository:
             params.append(normalized_batch_id)
         normalized_bot_risk = str(bot_risk or "").strip().lower()
         if normalized_bot_risk in {"1", "true", "yes", "risk", "bot", "bot_risk"}:
-            clauses.append("bot_risk = 1")
+            clauses.append(
+                "(COALESCE(bot_risk, 0) = 1 OR "
+                "(trim(COALESCE(bfs, '')) <> '' AND trim(COALESCE(bfs, '')) <> '0'))"
+            )
         elif normalized_bot_risk in {"0", "false", "no", "normal", "safe"}:
-            clauses.append("COALESCE(bot_risk, 0) = 0")
+            clauses.append(
+                "COALESCE(bot_risk, 0) = 0 AND ("
+                "trim(COALESCE(bfs, '')) = '0' OR "
+                "(trim(COALESCE(bfs, '')) = '' AND "
+                "json_extract(CASE WHEN json_valid(extra_json) THEN extra_json ELSE '{}' END, "
+                "'$.sso_check_status') = 'clean'))"
+            )
+        elif normalized_bot_risk in {"unknown", "unchecked", "pending"}:
+            clauses.append(
+                "COALESCE(bot_risk, 0) = 0 AND trim(COALESCE(bfs, '')) = '' AND "
+                "COALESCE(json_extract(CASE WHEN json_valid(extra_json) THEN extra_json ELSE '{}' END, "
+                "'$.sso_check_status'), '') <> 'clean'"
+            )
         normalized_keyword = str(keyword or "").strip()
         if normalized_keyword:
             like = f"%{normalized_keyword}%"
@@ -418,6 +651,61 @@ class RegistrationRepository:
                 f"SELECT COUNT(*) AS total FROM registration_results {where}", params
             ).fetchone()
         return int(row["total"] or 0)
+
+    def list_result_ids(
+        self,
+        *,
+        status: str = "",
+        email_disable_status: str = "",
+        keyword: str = "",
+        batch_id: str = "",
+        bot_risk: str = "",
+    ) -> List[int]:
+        """返回与账号列表相同筛选条件下的全部主键，顺序与列表一致。"""
+        where, params = self._result_filters(
+            status=status,
+            email_disable_status=email_disable_status,
+            keyword=keyword,
+            batch_id=batch_id,
+            bot_risk=bot_risk,
+        )
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT id
+                FROM registration_results
+                {where}
+                ORDER BY finished_at DESC, id DESC
+                """,
+                params,
+            ).fetchall()
+        return [int(row["id"]) for row in rows]
+
+    def list_actionable_result_ids(
+        self,
+        action: str,
+        *,
+        keyword: str = "",
+        bot_risk: str = "",
+    ) -> List[int]:
+        """返回任务页面中符合搜索条件且可执行指定操作的全部账号主键。"""
+        normalized_action = str(action or "").strip().lower()
+        if normalized_action not in {"relogin", "sso_check"}:
+            raise ValueError("action 必须是 relogin 或 sso_check")
+        where, params = self._result_filters(keyword=keyword, bot_risk=bot_risk)
+        clauses = []
+        if normalized_action == "relogin":
+            clauses.extend(["trim(COALESCE(email, '')) <> ''", "trim(COALESCE(password, '')) <> ''"])
+        else:
+            clauses.extend(["trim(COALESCE(email, '')) <> ''", "COALESCE(sso_saved, 0) = 1"])
+        actionable = " AND ".join(clauses)
+        where = f"{where} AND {actionable}" if where else f"WHERE {actionable}"
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"SELECT id FROM registration_results {where} ORDER BY finished_at DESC, id DESC",
+                params,
+            ).fetchall()
+        return [int(row["id"]) for row in rows]
 
     def get_results_by_ids(self, ids: Iterable[int | str]) -> List[Dict[str, Any]]:
         """按主键批量读取记录，保持传入顺序。"""
@@ -531,6 +819,15 @@ class RegistrationRepository:
                         "grok2api_remote_error": str(
                             detail.get("grok2api_remote_error") or ""
                         ),
+                        "sub2api_remote_status": str(
+                            detail.get("sub2api_remote_status") or "disabled"
+                        ),
+                        "sub2api_remote_imported_at": str(
+                            detail.get("sub2api_remote_imported_at") or ""
+                        ),
+                        "sub2api_remote_error": str(
+                            detail.get("sub2api_remote_error") or ""
+                        ),
                         "bot_risk": 1 if bool(detail.get("bot_risk")) else 0,
                         "bfs": (
                             ""
@@ -555,12 +852,76 @@ class RegistrationRepository:
                         "grok2api_remote_status = :grok2api_remote_status",
                         "grok2api_remote_imported_at = :grok2api_remote_imported_at",
                         "grok2api_remote_error = :grok2api_remote_error",
+                        "sub2api_remote_status = :sub2api_remote_status",
+                        "sub2api_remote_imported_at = :sub2api_remote_imported_at",
+                        "sub2api_remote_error = :sub2api_remote_error",
                         "bot_risk = :bot_risk",
                         "bfs = :bfs",
                     ]
                 )
                 if relogin_status == "success" and not screenshot_path:
                     assignments.append("screenshot_path = ''")
+            cursor = conn.execute(
+                f"UPDATE registration_results SET {', '.join(assignments)} WHERE id = :id",
+                values,
+            )
+            return bool(cursor.rowcount)
+
+    def update_sso_check_result(
+        self,
+        account_id: int,
+        *,
+        risk_state: Dict[str, Any],
+        status: str,
+    ) -> bool:
+        """保存一次 SSO 详细检查结果；仅明确结论同步 bot_risk / bfs。"""
+        try:
+            normalized_id = int(account_id)
+        except (TypeError, ValueError):
+            return False
+        if normalized_id <= 0:
+            return False
+        state = dict(risk_state or {})
+        bot_flag = state.get("bot_flag") if isinstance(state.get("bot_flag"), dict) else {}
+        source = state.get("bot_flag_source", bot_flag.get("source"))
+        normalized_status = str(status or "unknown").strip().lower() or "unknown"
+        now = self.now_text()
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT extra_json FROM registration_results WHERE id = ?",
+                (normalized_id,),
+            ).fetchone()
+            if row is None:
+                return False
+            try:
+                extra = json.loads(str(row["extra_json"] or "{}"))
+                if not isinstance(extra, dict):
+                    extra = {}
+            except (TypeError, ValueError, json.JSONDecodeError):
+                extra = {}
+            extra.update(
+                {
+                    "sso_risk_check": state,
+                    "sso_check_status": normalized_status,
+                    "sso_check_at": now,
+                }
+            )
+            assignments = ["extra_json = :extra_json"]
+            values: Dict[str, Any] = {
+                "extra_json": json.dumps(extra, ensure_ascii=False, sort_keys=True),
+                "id": normalized_id,
+            }
+            # 未知或请求失败不能证明账号已经恢复正常，保留此前明确的风险结论。
+            if normalized_status in {"clean", "flagged"}:
+                assignments.append("bot_risk = :bot_risk")
+                values.update(
+                    {
+                        "bot_risk": 1 if normalized_status == "flagged" else 0,
+                    }
+                )
+                if source is not None and str(source).strip() != "":
+                    assignments.append("bfs = :bfs")
+                    values["bfs"] = str(source)
             cursor = conn.execute(
                 f"UPDATE registration_results SET {', '.join(assignments)} WHERE id = :id",
                 values,
@@ -654,6 +1015,11 @@ class RegistrationRepository:
             for start in range(0, len(delete_ids), SQLITE_IN_BATCH_SIZE):
                 batch = delete_ids[start : start + SQLITE_IN_BATCH_SIZE]
                 placeholders = ", ".join("?" for _ in batch)
+                conn.execute(
+                    f"DELETE FROM account_monitor_outbox "
+                    f"WHERE registration_id IN ({placeholders})",
+                    batch,
+                )
                 conn.execute(
                     f"DELETE FROM registration_results WHERE id IN ({placeholders})",
                     batch,

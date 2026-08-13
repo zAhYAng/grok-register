@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { Archive, Copy, Download, Loader2, Search, ShieldAlert, UploadCloud } from "lucide-react";
 import { AccountEmailLabel } from "@/components/AccountEmailIcon";
-import { Badge, Button, Card, EmptyState, Input, PageHeader, PaginationBar, Toast } from "@/components/ui";
+import { AccountPageContext } from "@/components/AccountPageContext";
+import { Badge, Button, Card, EmptyState, Input, PageHeader, PaginationBar, Select, Toast } from "@/components/ui";
 import { api, type AccountRecord, type AuthKind } from "@/lib/api";
 import { copyText } from "@/lib/utils";
 
@@ -14,6 +15,7 @@ export function CredentialsPage() {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
   const [total, setTotal] = useState(0);
+  const [selectingAll, setSelectingAll] = useState(false);
   const [busy, setBusy] = useState("");
   const [toast, setToast] = useState<{ message: string; tone?: "default" | "success" | "error" }>({ message: "" });
 
@@ -66,6 +68,19 @@ export function CredentialsPage() {
     });
   };
 
+  const selectAllAvailable = async () => {
+    setSelectingAll(true);
+    try {
+      const result = await api.actionableAccountIds("auth_export", query.trim(), "", tab);
+      setSelected(Object.fromEntries((result.ids || []).map((id) => [id, true])));
+      notify(`已选择 ${result.total} 个可用文件`, "success");
+    } catch (error: any) {
+      notify(error.message || "选择全部文件失败", "error");
+    } finally {
+      setSelectingAll(false);
+    }
+  };
+
   const batchDownload = async () => {
     if (!selectedIds.length) return;
     setBusy("download");
@@ -114,6 +129,7 @@ export function CredentialsPage() {
 
   return (
     <div className="space-y-5">
+      <AccountPageContext crumbs={[{ label: "授权文件" }]} />
       <PageHeader
         title="授权文件"
         description="集中查看、复制和导出 CPA 与 Grok2API 授权文件，减少账号列表中的操作负担。"
@@ -141,26 +157,33 @@ export function CredentialsPage() {
       <Card className="overflow-hidden">
         <div className="border-b border-slate-200 p-4 sm:p-5">
           <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-            <div className="grid grid-cols-3 gap-1 rounded-lg bg-slate-100 p-1 sm:w-[30rem]">
-              {(["cpa", "grok2api", "sso"] as const).map((value) => (
-                <button
-                  key={value}
-                  type="button"
-                  onClick={() => { setTab(value); setSelected({}); }}
-                  className={`min-h-10 rounded-md text-sm font-medium ${tab === value ? "bg-white text-slate-950 shadow-sm" : "text-slate-500"}`}
-                >
-                  {value === "cpa" ? "CPA / Auth" : value === "grok2api" ? "Grok2API" : "SSO"}
-                </button>
-              ))}
+            <div className="sm:w-56">
+              <label htmlFor="credential-kind" className="mb-1.5 block text-xs font-medium text-slate-500">文件类型</label>
+              <Select
+                id="credential-kind"
+                value={tab}
+                onChange={(event) => { setTab(event.target.value as AuthKind); setSelected({}); }}
+              >
+                <option value="cpa">CPA / Auth</option>
+                <option value="grok2api">Grok2API</option>
+                <option value="sso">SSO</option>
+              </Select>
             </div>
             <div className="relative sm:w-80">
               <Search className="pointer-events-none absolute left-3 top-3.5 h-4 w-4 text-slate-400" />
               <Input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索邮箱" className="pl-9" />
             </div>
-            <label className="flex min-h-10 cursor-pointer items-center gap-2 text-sm text-slate-600">
-              <input type="checkbox" disabled={!selectableItems.length} checked={allVisibleSelected} onChange={(event) => toggleAllVisible(event.target.checked)} aria-label="全选本页可用授权文件" />
-              全选本页
-            </label>
+            <div className="flex flex-wrap items-center gap-2 text-sm text-slate-600">
+              <label className="flex min-h-10 cursor-pointer items-center gap-2">
+                <input type="checkbox" disabled={!selectableItems.length} checked={allVisibleSelected} onChange={(event) => toggleAllVisible(event.target.checked)} aria-label="全选本页可用授权文件" />
+                全选本页
+              </label>
+              <Button size="sm" variant="ghost" disabled={selectingAll || !total} onClick={() => void selectAllAvailable()}>
+                {selectingAll ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                选择全部结果
+              </Button>
+              {selectedIds.length ? <Button size="sm" variant="ghost" onClick={() => setSelected({})}>取消</Button> : null}
+            </div>
           </div>
         </div>
 
