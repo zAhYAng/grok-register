@@ -1,6 +1,6 @@
 # 部署说明
 
-Docker Compose 是推荐方式。容器内使用 Xvfb 运行有头 Camoufox，因此无桌面、只有 SSH 的 Linux 服务器也能运行。
+Docker Compose 是推荐方式。容器内使用 Xvfb 运行有头 Camoufox 或 CloakBrowser，因此无桌面、只有 SSH 的 Linux 服务器也能运行；默认后端保持 Camoufox。
 
 ## Docker Compose：本地构建
 
@@ -26,6 +26,12 @@ docker compose logs -f grok-register
 
 ```bash
 docker compose run --rm grok-register python /app/docker/camoufox_smoke.py
+```
+
+验证 CloakBrowser（首次运行会把 Chromium 下载到 `data/cloakbrowser-cache/`）：
+
+```bash
+docker compose run --rm grok-register python /app/docker/cloakbrowser_smoke.py
 ```
 
 停止或更新：
@@ -152,7 +158,7 @@ GROK_REGISTER_IMAGE=ghcr.io/kaibush/grok-register:latest
 
 ```bash
 docker compose pull
-docker compose up -d
+docker compose up -d --force-recreate
 ```
 
 私有镜像先登录：
@@ -164,9 +170,14 @@ echo "$GITHUB_TOKEN" | docker login ghcr.io -u GITHUB_USER --password-stdin
 GitHub Actions 规则：
 
 - `master` / `main`：构建并发布 amd64
-- `v*` 标签：构建并发布 amd64、arm64
+- `v*` 标签：构建并发布 amd64、arm64，同时创建 GitHub Release
 - Pull Request：只测试和构建，不发布
 - `workflow_dispatch`：支持手动触发
+
+注册机启动时会立即读取 GitHub 最新 Release，之后每 1 小时复查。管理页面
+发现新版本后自动弹出可关闭提示；同一版本关闭一次后不再重复提示。登录后访问
+`/overview?preview-update=1` 可以预览弹窗，不需要先创建测试 Release。实际升级
+继续通过 `docker compose pull && docker compose up -d --force-recreate` 完成。
 
 需要免登录分发时，在 GitHub Packages 将容器包设为 Public。
 
@@ -272,6 +283,7 @@ Linux 宿主机使用 `127.0.0.1` 监听代理时，需在代理软件中开启 
 
 ```bash
 docker compose run --rm grok-register python /app/docker/camoufox_smoke.py
+docker compose run --rm grok-register python /app/docker/cloakbrowser_smoke.py
 docker compose logs --tail=200 grok-register
 ```
 

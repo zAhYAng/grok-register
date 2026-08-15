@@ -519,7 +519,7 @@ class RegistrationRepository:
         return row is not None
 
     def has_registered_or_consumed(self, email: str) -> bool:
-        """成功、已保存 SSO，或已判定账号已注册的邮箱，都应避免再次取用。"""
+        """成功、已保存 SSO，或已判定账号已注册 / 注册风控 / SSO 超时的邮箱，都应避免再次取用。"""
         normalized = str(email or "").strip()
         if not normalized:
             return False
@@ -532,7 +532,9 @@ class RegistrationRepository:
                   AND (
                     success = 1
                     OR sso_saved = 1
-                    OR lower(coalesce(failure_type, '')) = 'already_registered'
+                    OR lower(coalesce(failure_type, '')) IN (
+                        'already_registered', 'registration_risk', 'sso_timeout'
+                    )
                     OR lower(coalesce(email_disable_status, '')) IN ('success', 'failed')
                   )
                 LIMIT 1
@@ -746,6 +748,8 @@ class RegistrationRepository:
         cpa_detail: Optional[Dict[str, Any]] = None,
         status: str = "success",
         error: str = "",
+        failure_type: str = "",
+        failure_reason: str = "",
         screenshot_path: str = "",
         diagnostics: Optional[Dict[str, Any]] = None,
     ) -> bool:
@@ -781,6 +785,11 @@ class RegistrationRepository:
             )
             if diagnostics:
                 extra["relogin_diagnostics"] = dict(diagnostics)
+            elif relogin_status == "success":
+                extra.pop("relogin_diagnostics", None)
+            if relogin_status == "success":
+                extra.pop("exception_traceback", None)
+                extra.pop("exception_type", None)
             values: Dict[str, Any] = {
                 "extra_json": json.dumps(extra, ensure_ascii=False, sort_keys=True),
                 "id": normalized_id,
@@ -789,6 +798,40 @@ class RegistrationRepository:
             if screenshot_path:
                 assignments.append("screenshot_path = :screenshot_path")
                 values["screenshot_path"] = str(screenshot_path)
+            if relogin_status == "success":
+                values.update(
+                    {
+                        "status": "success",
+                        "success": 1,
+                        "failure_type": "",
+                        "failure_reason": "",
+                    }
+                )
+                assignments.extend(
+                    [
+                        "status = :status",
+                        "success = :success",
+                        "failure_type = :failure_type",
+                        "failure_reason = :failure_reason",
+                    ]
+                )
+            elif str(failure_type or "").strip():
+                values.update(
+                    {
+                        "status": "failure",
+                        "success": 0,
+                        "failure_type": str(failure_type).strip(),
+                        "failure_reason": str(failure_reason or error or "").strip(),
+                    }
+                )
+                assignments.extend(
+                    [
+                        "status = :status",
+                        "success = :success",
+                        "failure_type = :failure_type",
+                        "failure_reason = :failure_reason",
+                    ]
+                )
             if relogin_status in {"success", "partial"} and account_file:
                 auth_info = detail.get("auth_info", "")
                 if isinstance(auth_info, (list, tuple, set)):
@@ -952,14 +995,14 @@ class RegistrationRepository:
             return int(cursor.rowcount or 0)
 
     def backfill_registration_risk_bot_risk(self) -> int:
-        """把历史 registration_risk 失败记录补上 bot_risk 标记。
+        """补齐历史风控标记，并修复重登风控后遗留的 sso_timeout。
 
         只认 failure_reason 里带 botFlagSource 的行——那是服务端真正下了风控裁决
         的记录。registration_risk 也覆盖"sso 为空"这类前置条件失败，那些不是
         机器人标记，不能一并标上。
         """
         with self._connect() as conn:
-            cursor = conn.execute(
+            bot_risk_cursor = conn.execute(
                 """
                 UPDATE registration_results
                 SET bot_risk = 1
@@ -968,7 +1011,23 @@ class RegistrationRepository:
                   AND failure_reason LIKE '%botFlagSource%'
                 """
             )
-            return int(cursor.rowcount or 0)
+            relogin_cursor = conn.execute(
+                """
+                UPDATE registration_results
+                SET failure_type = 'registration_risk',
+                    failure_reason = CASE
+                        WHEN trim(COALESCE(bfs, '')) <> ''
+                            THEN '重新登录 SSO 风控异常: botFlagSource=' || trim(bfs)
+                        ELSE '重新登录 SSO 风控异常'
+                    END
+                WHERE status = 'failure'
+                  AND failure_type = 'sso_timeout'
+                  AND COALESCE(bot_risk, 0) = 1
+                  AND json_extract(extra_json, '$.relogin_status') = 'partial'
+                  AND json_extract(extra_json, '$.sso_check_status') = 'flagged'
+                """
+            )
+            return int(bot_risk_cursor.rowcount or 0) + int(relogin_cursor.rowcount or 0)
 
     def update_remote_import_status(
         self,

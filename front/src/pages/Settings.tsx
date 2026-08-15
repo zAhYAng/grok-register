@@ -89,6 +89,10 @@ const OUTLOOK_PICK_MODES = [
   { value: "random", label: "随机选取" },
   { value: "sequential", label: "顺序选取" },
 ];
+const BROWSER_ENGINES = [
+  { value: "camoufox", label: "Camoufox（Firefox，默认）" },
+  { value: "cloakbrowser", label: "CloakBrowser（Chromium）" },
+];
 const CLOUDFLARE_AUTH_MODES = [
   { value: "none", label: "无需鉴权" },
   { value: "bearer", label: "Bearer Token" },
@@ -413,6 +417,19 @@ export function SettingsPage({ section = "registration" }: { section?: SettingsS
             <ConfigField {...fieldState} label="并发浏览器数" field="register_workers" type="number" />
             <ConfigField {...fieldState} label="日志级别" field="log_level" placeholder="info（普通）/ debug（详细）" />
             <div className="min-w-0 space-y-2">
+              <Label htmlFor="browser_engine">浏览器后端</Label>
+              <Select
+                id="browser_engine"
+                value={config.browser_engine || "camoufox"}
+                onChange={(event) => setField("browser_engine", event.target.value)}
+              >
+                {BROWSER_ENGINES.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+              </Select>
+              <p className="text-xs leading-5 text-muted-foreground">
+                Camoufox 始终保留；选择 CloakBrowser 后仅替换启动后端，注册流程保持一致。
+              </p>
+            </div>
+            <div className="min-w-0 space-y-2">
               <Label htmlFor="browser_locale">浏览器界面语言</Label>
               <Select
                 id="browser_locale"
@@ -441,7 +458,7 @@ export function SettingsPage({ section = "registration" }: { section?: SettingsS
               />
               <ToggleRow
                 title="无头浏览器"
-                description="后台运行且不显示窗口；Camoufox 会修正常见无头指纹，但无法保证不触发站点风控"
+                description="后台运行且不显示窗口；所选后端会处理常见无头指纹，站点仍可能结合环境与行为判定"
                 checked={!!config.browser_headless}
                 onCheckedChange={(value) => setField("browser_headless", value)}
               />
@@ -755,7 +772,7 @@ export function SettingsPage({ section = "registration" }: { section?: SettingsS
             <div className="sm:col-span-2">
               <ToggleRow
                 title="CPA 成功后停用 Outlook 邮箱"
-                description="仅 accounts 来源生效；CPA 状态必须为 success，随后自动更新邮箱为 inactive"
+                description="仅 accounts 来源生效；CPA 成功、账号已注册、注册风控或 SSO 超时后都会把邮箱更新为 inactive"
                 checked={!!config.outlookemail_disable_after_cpa_success}
                 onCheckedChange={(value) =>
                   setField("outlookemail_disable_after_cpa_success", value)
